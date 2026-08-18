@@ -11111,7 +11111,7 @@ function finalize(t, bytes, parityBad){
   if(rx.errors.length) msg(t, rx.errors.join(' '), 'err');
   else if(parityBad) msg(t, '読み取りました。ただし分割QRのパリティが一致しません。データが混在していないか生データを確認してください。', 'warn');
   else msg(t, `読み取りました（${rx.rps.length}剤 / ${rx.drugs.length}薬品）。`, 'ok');
-  beep(rx.errors.length?220:880);
+  beep(rx.errors.length?'err':'ok');
   if(t==='curr' && !rx.errors.length) afterScanCurrent(rx);
 }
 
@@ -11215,14 +11215,34 @@ document.getElementById('jsonpick').addEventListener('change', async e=>{
   document.getElementById('bakMsg').textContent='ファイルを読み込みました。［取り込む］で反映します。';
 });
 
-function beep(f){
+/* 読取音。iOS Safari は AudioContext をタップ操作の中で起動しないと無音になるため、
+   共有の Context を1つ持ち、画面のタップごとに resume して備える。 */
+let audioCtx=null;
+function ensureAudio(){
   try{
-    const C=window.AudioContext||window.webkitAudioContext; if(!C) return;
-    const ctx=new C(), o=ctx.createOscillator(), g=ctx.createGain();
-    o.frequency.value=f; g.gain.value=0.06; o.connect(g); g.connect(ctx.destination);
-    o.start(); o.stop(ctx.currentTime+0.09);
-    setTimeout(()=>ctx.close(), 300);
-  }catch(e){}
+    const C=window.AudioContext||window.webkitAudioContext; if(!C) return null;
+    if(!audioCtx) audioCtx=new C();
+    if(audioCtx.state==='suspended') audioCtx.resume().catch(()=>{});
+    return audioCtx;
+  }catch(e){ return null; }
+}
+document.addEventListener('pointerdown', ensureAudio, true);
+function tone(ctx,f,start,dur){
+  const o=ctx.createOscillator(), g=ctx.createGain();
+  o.frequency.value=f;
+  g.gain.setValueAtTime(0.08, start);
+  g.gain.exponentialRampToValueAtTime(0.001, start+dur);
+  o.connect(g); g.connect(ctx.destination);
+  o.start(start); o.stop(start+dur);
+}
+/** kind: 'part'=1個読取, 'ok'=全部読取完了, 'dup'=読取済み, 'err'=エラー */
+function beep(kind){
+  const ctx=ensureAudio(); if(!ctx) return;
+  const t=ctx.currentTime+0.01;
+  if(kind==='part')      tone(ctx, 660, t, .10);
+  else if(kind==='ok'){  tone(ctx, 880, t, .10); tone(ctx, 1320, t+.12, .16); }
+  else if(kind==='dup')  tone(ctx, 330, t, .10);
+  else                   tone(ctx, 220, t, .30);
 }
 
 /* ---------- カメラ ---------- */
@@ -11287,9 +11307,9 @@ function handleScan(code){
   const t=cam.target, st=document.getElementById('scanState');
   const r=feedSymbol(code, t);
   const s=sessions[t];
-  if(r==='mismatch'){ st.textContent='別の処方せんのQRです。読み取りません。'; beep(220); return; }
+  if(r==='mismatch'){ st.textContent='別の処方せんのQRです。読み取りません。'; beep('err'); return; }
   if(r==='dup'){ st.textContent=`読取済みのQRです（${s.parts.size}/${s.total} 完了）`; return; }
-  if(r==='partial'){ st.textContent=`分割QR ${s.parts.size}/${s.total} 読取済み — 残りをかざしてください`; beep(660); return; }
+  if(r==='partial'){ st.textContent=`分割QR ${s.parts.size}/${s.total} 読取済み — 残りをかざしてください`; beep('part'); return; }
   st.textContent='読み取り完了';
   setTimeout(closeCamera, 500);
 }
@@ -11338,10 +11358,10 @@ function readImage(file, t){
       try{ code=jsQR(ctx.getImageData(0,0,w,h).data,w,h,{inversionAttempts:'attemptBoth'}); }catch(e){}
       if(!code){ setTimeout(step,0); return; }   // 描画を止めないよう1解像度ずつ試す
       const r=feedSymbol(code,t), s=sessions[t];
-      if(r==='mismatch') msg(t,'別の処方せんのQRです。読み取りませんでした。','err');
-      else if(r==='dup') msg(t,`読取済みのQRです（${s.parts.size}/${s.total} 完了）`,'warn');
-      else if(r==='partial') msg(t,`分割QR ${s.parts.size}/${s.total} 読取済み — 残りのQRも撮影してください。`,'warn');
-      // 完了時のメッセージは finalize() が出す
+      if(r==='mismatch'){ msg(t,'別の処方せんのQRです。読み取りませんでした。','err'); beep('err'); }
+      else if(r==='dup'){ msg(t,`読取済みのQRです（${s.parts.size}/${s.total} 完了）`,'warn'); beep('dup'); }
+      else if(r==='partial'){ msg(t,`分割QR ${s.parts.size}/${s.total} 読取済み — 残りのQRも撮影してください。`,'warn'); beep('part'); }
+      // 完了時のメッセージと音は finalize() が出す
     };
     setTimeout(step,0);
   };
