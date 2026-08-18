@@ -49,9 +49,16 @@ button.ghost:hover:not(:disabled){background:#e9edf1}
 .pane-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:10px}
 .pane-title{font-size:15px;font-weight:700;margin:0}
 .pane-state{font-size:12px;color:var(--sub)}
-.slots{display:flex;gap:5px;margin:10px 0 4px;flex-wrap:wrap;min-height:8px}
-.slot{width:26px;height:8px;border-radius:3px;background:#dfe4e9}
-.slot.on{background:#1c5fa8}
+.slots{display:flex;gap:6px;margin:10px 0 4px;flex-wrap:wrap;align-items:center}
+.slots .slots-label{font-size:11.5px;color:var(--sub);margin-right:2px}
+.slot{
+  display:flex;align-items:center;justify-content:center;
+  width:30px;height:24px;border-radius:6px;
+  background:#dfe4e9;color:var(--sub);font-size:12.5px;font-weight:700;
+  border:1px solid transparent
+}
+.slot.on{background:#1c5fa8;color:#fff}
+.slot.next{border-color:#1c5fa8;color:#1c5fa8;background:#eaf2fb}
 .summary-lines{font-size:13px;margin:8px 0 0}
 .summary-lines div{display:flex;gap:8px;padding:2px 0;border-bottom:1px dotted #e6eaee}
 .summary-lines .k{color:var(--sub);min-width:6.5em;flex:none}
@@ -137,7 +144,7 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
   .btnrow{gap:10px}
   .pane{padding:16px 14px 18px}
   .drop{padding:14px;font-size:13px}
-  .slot{width:34px;height:11px}
+  .slot{width:42px;height:32px;font-size:15px}
   .msg{font-size:14px;padding:10px 12px}
   table{font-size:14px}
   th,td{padding:9px 8px}
@@ -11060,15 +11067,27 @@ function remarksBlock(rx){
    ============================================================ */
 const sjis = new TextDecoder('shift_jis', {fatal:false});
 const sessions = {prev:newSession(), curr:newSession()};
-function newSession(){ return {parts:new Map(), total:null, parity:null}; }
+function newSession(){ return {parts:new Map(), total:null, parity:null, lastIdx:null}; }
 
 function renderSlots(t){
   const s=sessions[t];
-  const html = s.total
-    ? Array.from({length:s.total},(_,i)=>`<span class="slot ${s.parts.has(i)?'on':''}"></span>`).join('')
-    : '';
+  let html='';
+  if(s.total){
+    // 番号は処方せんに印字されている順（通常は左から）に対応する
+    const next=(()=>{ for(let i=0;i<s.total;i++) if(!s.parts.has(i)) return i; return -1; })();
+    html='<span class="slots-label">QR</span>'+
+      Array.from({length:s.total},(_,i)=>
+        `<span class="slot ${s.parts.has(i)?'on':(i===next?'next':'')}">${s.parts.has(i)?(i+1)+'✓':(i+1)}</span>`
+      ).join('');
+  }
   const el=document.getElementById('slots-'+t); if(el) el.innerHTML=html;
   if(cam.target===t) document.getElementById('slots-cam').innerHTML=html;
+}
+/** 未読の番号を「2番目・3番目」の形で返す */
+function missingText(s){
+  const miss=[];
+  for(let i=0;i<s.total;i++) if(!s.parts.has(i)) miss.push((i+1)+'番目');
+  return miss.join('・');
 }
 function msg(t, text, cls){
   const el=document.getElementById('msg-'+t); if(!el) return;
@@ -11091,6 +11110,7 @@ function feedSymbol(code, t){
   }
   const idx=sa.currentSequence, total=sa.totalSequence+1, parity=sa.parity;
   if(s.parity!==null && s.parity!==parity && s.parts.size>0) return 'mismatch';
+  s.lastIdx=idx;
   if(s.parts.has(idx)) return 'dup';
   s.parity=parity; s.total=total; s.parts.set(idx, bytes);
   renderSlots(t);
@@ -11308,8 +11328,8 @@ function handleScan(code){
   const r=feedSymbol(code, t);
   const s=sessions[t];
   if(r==='mismatch'){ st.textContent='別の処方せんのQRです。読み取りません。'; beep('err'); return; }
-  if(r==='dup'){ st.textContent=`読取済みのQRです（${s.parts.size}/${s.total} 完了）`; return; }
-  if(r==='partial'){ st.textContent=`分割QR ${s.parts.size}/${s.total} 読取済み — 残りをかざしてください`; beep('part'); return; }
+  if(r==='dup'){ st.textContent=`${s.lastIdx+1}番目は読取済み — 残り: ${missingText(s)}`; return; }
+  if(r==='partial'){ st.textContent=`${s.lastIdx+1}番目を読取（${s.parts.size}/${s.total}）— 残り: ${missingText(s)}`; beep('part'); return; }
   st.textContent='読み取り完了';
   setTimeout(closeCamera, 500);
 }
@@ -11359,8 +11379,8 @@ function readImage(file, t){
       if(!code){ setTimeout(step,0); return; }   // 描画を止めないよう1解像度ずつ試す
       const r=feedSymbol(code,t), s=sessions[t];
       if(r==='mismatch'){ msg(t,'別の処方せんのQRです。読み取りませんでした。','err'); beep('err'); }
-      else if(r==='dup'){ msg(t,`読取済みのQRです（${s.parts.size}/${s.total} 完了）`,'warn'); beep('dup'); }
-      else if(r==='partial'){ msg(t,`分割QR ${s.parts.size}/${s.total} 読取済み — 残りのQRも撮影してください。`,'warn'); beep('part'); }
+      else if(r==='dup'){ msg(t,`${s.lastIdx+1}番目は読取済みです。残り ${missingText(s)} を撮影してください。`,'warn'); beep('dup'); }
+      else if(r==='partial'){ msg(t,`${s.lastIdx+1}番目を読取（${s.parts.size}/${s.total}）。残り ${missingText(s)} を撮影してください。`,'warn'); beep('part'); }
       // 完了時のメッセージと音は finalize() が出す
     };
     setTimeout(step,0);
