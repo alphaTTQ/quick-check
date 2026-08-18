@@ -127,6 +127,15 @@ dialog::backdrop{background:rgba(10,16,22,.62)}
 #scanState{font-size:13.5px;font-weight:600}
 textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospace;font-size:12px;padding:9px;border:1px solid var(--line);border-radius:7px;resize:vertical}
 .hidden{display:none!important}
+/* 読取フィードバックの画面フラッシュ（マナーモードでも視認できる） */
+.flash{position:fixed;inset:0;pointer-events:none;z-index:2147483647;opacity:0}
+.flash.part{background:#1c5fa8}
+.flash.ok{background:#0b7a3b}
+.flash.dup{background:#98a2ac}
+.flash.err{background:#b3261e}
+.flash.go{animation:flashfade .4s ease-out}
+.flash.go.ok{animation-duration:.7s}
+@keyframes flashfade{from{opacity:.8}to{opacity:0}}
 .footnote{font-size:11.5px;color:var(--sub);margin-top:8px}
 .footnote code{background:#eef1f4;padding:0 4px;border-radius:3px}
 .storebar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
@@ -11255,8 +11264,28 @@ function tone(ctx,f,start,dur){
   o.connect(g); g.connect(ctx.destination);
   o.start(start); o.stop(start+dur);
 }
-/** kind: 'part'=1個読取, 'ok'=全部読取完了, 'dup'=読取済み, 'err'=エラー */
+/** 画面フラッシュ。カメラダイアログが開いている間はその中に出す
+ *  （<dialog> は最前面レイヤーに描画されるため、外に置くと隠れる）。 */
+function flash(kind){
+  const host=document.getElementById('camDlg').open
+    ? document.querySelector('#camDlg .dlg') : document.body;
+  let el=host.querySelector(':scope > .flash');
+  if(!el){ el=document.createElement('div'); el.className='flash'; host.appendChild(el); }
+  el.className='flash '+kind;          // 一度リセットしてアニメーションを再始動
+  void el.offsetWidth;
+  el.classList.add('go');
+}
+
+/** 読取フィードバック（音＋画面フラッシュ＋振動）
+ *  kind: 'part'=1個読取, 'ok'=全部読取完了, 'dup'=読取済み, 'err'=エラー
+ *  音はマナーモードで鳴らない。フラッシュは常に見える。
+ *  振動は Android のみ（iOS Safari は振動APIに非対応）。 */
 function beep(kind){
+  flash(kind);
+  try{
+    if(navigator.vibrate)
+      navigator.vibrate(kind==='part'?40 : kind==='ok'?[40,60,120] : kind==='dup'?20 : 250);
+  }catch(e){}
   const ctx=ensureAudio(); if(!ctx) return;
   const t=ctx.currentTime+0.01;
   if(kind==='part')      tone(ctx, 660, t, .10);
@@ -11331,7 +11360,7 @@ function handleScan(code){
   if(r==='dup'){ st.textContent=`${s.lastIdx+1}番目は読取済み — 残り: ${missingText(s)}`; return; }
   if(r==='partial'){ st.textContent=`${s.lastIdx+1}番目を読取（${s.parts.size}/${s.total}）— 残り: ${missingText(s)}`; beep('part'); return; }
   st.textContent='読み取り完了';
-  setTimeout(closeCamera, 500);
+  setTimeout(closeCamera, 800);   // 完了音とフラッシュを見せてから閉じる
 }
 function closeCamera(){
   if(cam.raf) cancelAnimationFrame(cam.raf); cam.raf=0;
