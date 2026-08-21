@@ -1,5 +1,7 @@
 // 実際のQR画像を生成 → jsQR で光学デコード → Shift-JIS 復号 までの通し試験
 const { execFileSync } = require('child_process');
+try{ execFileSync('iconv',['--version']); }
+catch(e){ console.log('SKIPPED: iconv が無いためこのテストは実行しません（Shift-JIS変換に必要）'); process.exit(0); }
 const jsQR = require('../src/jsQR.min.js');
 const qrcode = require('./qrgen.js');
 

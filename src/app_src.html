@@ -560,7 +560,7 @@ function runPass(prev, curr, keyFn, label, pairs){
   }
 }
 
-function diffPair(p,c){
+function diffPair(p,c,skipSupp){
   const ch=[];
   const unitSame = norm(p.単位)===norm(c.単位);
   if(!numEq(p.用量,c.用量) || !unitSame){
@@ -573,10 +573,12 @@ function diffPair(p,c){
   if(norm(useText(p.rp))!==norm(useText(c.rp))) ch.push({k:'用法', a:useText(p.rp), b:useText(c.rp)});
   if(p.rp.剤形区分!==c.rp.剤形区分)
     ch.push({k:'剤形', a:CODE.剤形区分[p.rp.剤形区分]||p.rp.剤形区分||'—', b:CODE.剤形区分[c.rp.剤形区分]||c.rp.剤形区分||'—'});
-  const ps=suppText(p), cs=suppText(c);
-  if(norm(ps)!==norm(cs)) ch.push({k:'薬品への指示', a:ps||'（なし）', b:cs||'（なし）'});
-  const pr=rpSuppText(p.rp), cr=rpSuppText(c.rp);
-  if(norm(pr)!==norm(cr)) ch.push({k:'剤への指示', a:pr||'（なし）', b:cr||'（なし）'});
+  if(!skipSupp){   // 片側が保存分（自由記述を保存しない）の場合、指示の比較は成立しない
+    const ps=suppText(p), cs=suppText(c);
+    if(norm(ps)!==norm(cs)) ch.push({k:'薬品への指示', a:ps||'（なし）', b:cs||'（なし）'});
+    const pr=rpSuppText(p.rp), cr=rpSuppText(c.rp);
+    if(norm(pr)!==norm(cr)) ch.push({k:'剤への指示', a:pr||'（なし）', b:cr||'（なし）'});
+  }
   if(p.情報区分!==c.情報区分 && (p.情報区分||c.情報区分))
     ch.push({k:'情報区分', a:CODE.情報区分[p.情報区分]||'—', b:CODE.情報区分[c.情報区分]||'—'});
   return ch;
@@ -609,7 +611,7 @@ function compare(prevRx, currRx){
 
   const rows=[];
   for(const pr of pairs){
-    const ch=diffPair(pr.prev,pr.curr);
+    const ch=diffPair(pr.prev,pr.curr, prevRx.補足除外===true||currRx.補足除外===true);
     const spec = pr.match==='base' && norm(pr.prev.名称)!==norm(pr.curr.名称);
     if(spec) ch.unshift({k:'薬品名', a:pr.prev.名称, b:pr.curr.名称,
                          note:'含量を除いた名称が一致します。規格（含量）が変わっていないか確認してください。'});
@@ -725,14 +727,18 @@ function deptKey(rx){
  *  氏名等は保存せず、この鍵だけを持つ。
  *  カナ・漢字のどちらか一方しか記録しない医療機関があるため、両方から鍵を作って
  *  どれか一致すれば同一とみなす。
- *  医療機関・診療科が違えば別の鍵になる＝別機関の処方せん同士は比較されない。 */
+ *  医療機関・診療科が違えば別の鍵になる＝別機関の処方せん同士は比較されない。
+ *  **医療機関コードが無い場合は鍵を作らない**（第1回監査指摘・修正1。
+ *  空の機関キーを許すと、コード欠落の別病院同士が同一キーに合流するため）。 */
 function recordKeys(rx, salt){
   const p=rx.patient||{};
   const b=parseJDate(p.生年月日);
   const birth=b?b.key:'';
   const sex=p.性別||'';
   if(!birth) return [];                       // 生年月日がなければ照合しない（人違いを避ける）
-  const scope='|H:'+hospKey(rx)+'|D:'+deptKey(rx);
+  const hk=hospKey(rx);
+  if(!hk) return [];                          // 安定した医療機関キーを作れなければ照合しない
+  const scope='|H:'+hk+'|D:'+deptKey(rx);
   const keys=[];
   const mk=(tag,name)=>sha256hex(salt+'|'+tag+'|'+norm(name)+'|'+birth+'|'+sex+scope);
   if(p.カナ) keys.push(mk('k',p.カナ));
@@ -740,15 +746,29 @@ function recordKeys(rx, salt){
   return keys;
 }
 
+/** 候補照合キー: 氏名を含まない「生年月日＋性別＋医療機関＋診療科」。
+ *  カナ⇔漢字で氏名キーが一致しない場合の候補提示（修正5）に使う。
+ *  自動比較には使わない（同生年月日・同性別の別人が同キーになりうるため）。 */
+function candidateKey(rx, salt){
+  const p=rx.patient||{};
+  const b=parseJDate(p.生年月日);
+  const hk=hospKey(rx);
+  if(!b || !hk) return '';
+  return sha256hex(salt+'|c|'+b.key+'|'+(p.性別||'')+'|H:'+hk+'|D:'+deptKey(rx));
+}
+
 /** 保存してよいレコード番号。ここに無いものは保存時に捨てる。
  *  患者を特定しうるレコード（氏名11・性別12・生年月日13・保険21〜31・
  *  麻薬施用患者住所61・電子処方箋の引換番号82）は保存しない。
+ *  自由記述レコード（備考81・用法補足181・薬品補足281）も保存しない：
+ *  備考等に患者名・住所が書かれる運用があり、患者情報の紛れ込み経路になるため
+ *  （第1回監査指摘・修正6）。読取時のその場表示のみで、比較の対象からも外す。
  *  比較に必要な処方内容と、監査に必要な最小限の背景だけを残す。 */
 const STORE_KEEP=new Set([
   '1','4','5',                       // 医療機関名・診療科・医師（患者の情報ではない）
-  '51','52','62','63','64','81',     // 交付日・使用期限・残薬確認・分割・リフィル・備考
-  '101','102','111','181',           // 剤形・調剤数量・用法・用法補足
-  '201','211','221','231','241','281'// 薬品・単位変換・不均等・負担区分・1回量・薬品補足
+  '51','52','62','63','64',          // 交付日・使用期限・残薬確認・分割・リフィル
+  '101','102','111',                 // 剤形・調剤数量・用法
+  '201','211','221','231','241'      // 薬品・単位変換・不均等・負担区分・1回量
 ]);
 
 /** 保存用に、患者を特定しうる行を落とす */
@@ -766,19 +786,23 @@ function stripForStorage(raw){
    保存の置き換え判定（chooseRecord）の両方がここを参照するため、
    「画面では今回扱いなのに保存は置き換えない」といった食い違いは起きない。 */
 
-/** 読んだ処方せんを「今回」とするか。交付日(YYYYMMDDのキー文字列)で判定。
- *  同日は読んだ方が今回（読取時刻が新しいため）。どちらかの日付が不明な場合も
- *  読んだ方を今回とする（実物が手元にある方を優先する）。 */
+/** 読んだ処方せんを「今回」と確定できるか。交付日(YYYYMMDDのキー文字列)で判定。
+ *  同日は読んだ方が今回（読取時刻が新しいため）。
+ *  **どちらかの日付が不明なら false**＝新旧を判定できない（第1回監査指摘・修正2。
+ *  以前は「読んだ方を今回」としており、日付不明のQRが最新の保存を上書きできた）。 */
 function scannedIsCurrent(storedDate, scannedDate){
-  if(!storedDate || !scannedDate) return true;
-  return scannedDate >= storedDate;
+  return !!(storedDate && scannedDate) && scannedDate >= storedDate;
 }
 
 /** 保存レコード（無ければnull）と読取交付日から、画面と保存の扱いを決める。
- *  戻り値: {mode:'first'}
- *        | {mode:'compare', scannedRole:'curr'|'prev', replaceStored:boolean} */
+ *  戻り値: {mode:'first', noDate?}
+ *        | {mode:'compare', scannedRole:'curr'|'prev', replaceStored:boolean, dateUnknown?}
+ *  dateUnknown のとき: 表示上は読んだ方を「今回」の位置に置くが新旧は未確定で、
+ *  保存は置き換えない。 */
 function decideScan(existing, scannedDate){
-  if(!existing) return {mode:'first'};
+  if(!existing) return scannedDate ? {mode:'first'} : {mode:'first', noDate:true};
+  if(!scannedDate || !existing.date)
+    return {mode:'compare', scannedRole:'curr', replaceStored:false, dateUnknown:true};
   const cur=scannedIsCurrent(existing.date, scannedDate);
   return {mode:'compare', scannedRole:cur?'curr':'prev', replaceStored:cur};
 }
@@ -789,8 +813,10 @@ function purgeDue(rec, now, keepDays){
 }
 
 /** 既存の保存分と今読んだ分の、どちらを保存として残すかを決める。
- *  交付日が新しい方を残す（前回処方をあとから読んでも上書きしない）。 */
+ *  交付日が新しい方を残す（前回処方をあとから読んでも上書きしない）。
+ *  交付日が読み取れないものは保存しない・既存を置き換えない（新旧の基準にできないため）。 */
 function chooseRecord(existing, incomingDate){
+  if(!incomingDate) return 'keep';
   if(!existing) return 'save';
   return scannedIsCurrent(existing.date, incomingDate) ? 'save' : 'keep';
 }
@@ -799,6 +825,7 @@ const Store=(function(){
   const DBNAME='shohousen_kansa', VER=1, ST='rx';
   const LSKEY='shohousen_kansa_v1';
   let db=null, mode='memory', mem={salt:null, recs:{}};
+  let degraded=null;   // housekeeping失敗時に理由が入る。非nullの間は保存・自動比較を止める
 
   function idbReq(r){ return new Promise((res,rej)=>{ r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); }
 
@@ -828,11 +855,15 @@ const Store=(function(){
     if(mode==='idb' && navigator.storage && navigator.storage.persist){
       try{ await navigator.storage.persist(); }catch(e){}   // 自動削除されにくくする
     }
-    await housekeeping();
+    // 整理（移行・90日purge）に失敗したら fail-closed:
+    // 「消せていないのに溜め続ける」ことを避けるため、保存・自動比較を止める
+    // （読取とその場表示は続けられる）。第1回監査指摘・修正4。
+    try{ degraded=null; await housekeeping(); }
+    catch(e){ degraded='保存領域の整理（期限切れ削除）に失敗: '+(e&&e.name||e); }
     return mode;
   }
 
-  const SCHEMA=2;        // 2 = 患者×医療機関×診療科キー（2026-08-20〜）
+  const SCHEMA=3;        // 3 = 候補照合キー(cand)追加・交付日必須（2026-08-20監査対応）
   const KEEP_DAYS=90;    // 端末に処方情報を残す期間
   async function metaGet(k){
     if(mode==='idb') return await idbReq(db.transaction('meta','readonly').objectStore('meta').get(k));
@@ -846,13 +877,30 @@ const Store=(function(){
     }
     mem['meta_'+k]=v; flush();
   }
-  /** 起動時の整理: 鍵の作り方が変わった旧データの破棄と、90日を過ぎた保存の自動削除 */
+  /** 起動時の整理: 鍵の作り方が変わった旧データの破棄と、90日を過ぎた保存の自動削除。
+   *  失敗は握りつぶさず呼び出し元（init）へ投げる（fail-closed）。 */
   async function housekeeping(){
-    try{
-      if(await metaGet('schema')!==SCHEMA){ await clear(); await metaSet('schema',SCHEMA); }
-      const now=Date.now();
-      for(const r of await all()) if(purgeDue(r, now, KEEP_DAYS)) await delRec(r.id);
-    }catch(e){}
+    if(api._test.failHousekeeping) throw new Error('housekeeping test failure');
+    if(await metaGet('schema')!==SCHEMA){ await clear(); await metaSet('schema',SCHEMA); }
+    const now=Date.now();
+    for(const r of await all()) if(purgeDue(r, now, KEEP_DAYS)) await delRec(r.id);
+  }
+
+  /** バックアップ取込用の原子的な全置換。検証済みレコードのみ渡すこと。
+   *  IndexedDBでは1トランザクションで clear→全put→salt を行い、途中失敗時は
+   *  何も反映されない（部分取込をしない。第1回監査指摘・修正3）。 */
+  async function replaceAll(recs, salt){
+    if(mode==='idb'){
+      const tx=db.transaction([ST,'meta'],'readwrite');
+      tx.objectStore(ST).clear();
+      for(const r of recs) tx.objectStore(ST).put(r);
+      if(salt) tx.objectStore('meta').put(salt,'salt');
+      return new Promise((res,rej)=>{ tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); tx.onabort=()=>rej(tx.error||new Error('aborted')); });
+    }
+    const next={};
+    for(const r of recs) next[r.id]=r;
+    mem.recs=next; if(salt) mem.salt=salt;
+    flush();
   }
   function flush(){ if(mode==='local'){ try{ localStorage.setItem(LSKEY, JSON.stringify(mem)); }catch(e){} } }
 
@@ -921,21 +969,31 @@ const Store=(function(){
     }
     mem.recs={}; flush();
   }
-  return {init, getSalt, setSalt, findByKeys, putRec, delRec, all, clear,
-          get mode(){ return mode; }, KEEP_DAYS};
+  const api={init, getSalt, setSalt, findByKeys, putRec, delRec, all, clear, replaceAll,
+          get mode(){ return mode; },
+          get degraded(){ return degraded; },
+          KEEP_DAYS,
+          _test:{failHousekeeping:false}};   // 回帰テスト用フック（本番コードからは常にfalse）
+  return api;
 })();
 
-/** 今読んだ処方を保存する（交付日が新しい方を残す） */
-async function saveCurrent(rx, keys, existing){
-  if(!keys.length) return {saved:false, reason:'患者氏名または生年月日が記録されていないため、保存できません。'};
+/** 今読んだ処方を保存する（交付日が新しい方を残す。交付日不明は保存しない）。
+ *  existing がある場合、照合キー（keys/cand）は常に統合して保持する
+ *  —— カナ⇔漢字の手動確認後の統合（修正5）もこの経路で永続化される。 */
+async function saveCurrent(rx, keys, existing, cand){
+  if(!keys.length) return {saved:false, reason:'照合キーを作れないため保存できません。'};
   const date=(parseJDate(rx.交付年月日)||{}).key||'';
   const merged=[...new Set([...keys, ...(existing?existing.keys||[]:[])])];
+  const mergedCand=(existing&&existing.cand)||cand||'';
   if(chooseRecord(existing, date)==='keep'){
-    await Store.putRec(Object.assign({}, existing, {keys:merged}));
-    return {saved:false, reason:'保存済みの処方の方が新しいため、保存は更新しませんでした。'};
+    if(!existing) return {saved:false, reason:'交付日が読み取れないため保存しません（次回の新旧判定の基準にできないため）。'};
+    await Store.putRec(Object.assign({}, existing, {keys:merged, cand:mergedCand}));
+    return {saved:false, reason: date
+      ? '保存済みの処方の方が新しいため、保存は更新しませんでした。'
+      : '交付日が読み取れないため、保存は更新しませんでした（保存分は維持）。'};
   }
-  await Store.putRec({id: existing?existing.id:keys[0], keys:merged, date, savedAt:Date.now(),
-                      text:stripForStorage(rx.raw)});
+  await Store.putRec({id: existing?existing.id:keys[0], keys:merged, cand:mergedCand, date,
+                      savedAt:Date.now(), text:stripForStorage(rx.raw)});
   return {saved:true, replaced:!!existing};
 }
 
@@ -990,7 +1048,7 @@ function renderResult(){
   }
 
   /* ---- 初回（比較対象なし） ---- */
-  if(!state.prev){
+  if(!state.prev && (compareMeta||{}).mode!=='candidates'){
     const rx=state.curr, cm=compareMeta||{};
     let h=`<div class="card"><h2>読取結果</h2>`;
     h+=`<div class="alert info"><b>初回（比較対象なし）</b> — ${esc(rxKeyText(rx))} の前回処方は保存されていません。`
@@ -1000,6 +1058,31 @@ function renderResult(){
     h+=`<div class="rx-cols"><div><h3>処方内容</h3>${rx.rps.map(rpBlock).join('')}${remarksBlock(rx)}</div></div></div>`;
     h+=`<div class="card noprint"><h2>読取データ（検証用）</h2>
       <details><summary>生データ（${rx.records.length} レコード）</summary><pre>${esc(rx.raw)}</pre></details></div>`;
+    el.innerHTML=h;
+    return;
+  }
+
+  /* ---- 候補確認（氏名表記違い） ---- */
+  if((compareMeta||{}).mode==='candidates' && pendingScan){
+    const rx=state.curr;
+    let h=`<div class="card"><h2>読取結果 — 確認が必要です</h2>
+      <div class="alert warn"><b>氏名の表記が異なる保存分があります。</b>
+      読み取った処方せん（${esc((rx.patient&&(rx.patient.氏名||rx.patient.カナ))||'—')}
+      ／ ${esc(rxKeyText(rx))}）と、生年月日・性別・医療機関・診療科が一致します。
+      カナ・漢字の表記違いで同一患者の可能性があります。自動では比較しません。</div>`;
+    for(const rec of pendingScan.candidates){
+      const s=parseJahis(rec.text);
+      const sd=parseJDate(s.交付年月日);
+      h+=`<div class="rp"><div class="rp-head">
+        <span>保存分: ${esc(sd?sd.text:'交付日不明')}交付　${esc(s.rps.length)}剤 ${esc(s.drugs.length)}薬品</span>
+        <span><button class="primary" onclick="confirmCandidate('${esc(rec.id)}')">同一患者として比較</button></span>
+        </div><div class="rp-body">${s.drugs.slice(0,6).map(d=>`<div class="rp-drug">${esc(d.名称||'（名称なし）')}　${esc(doseText(d))}</div>`).join('')}
+        ${s.drugs.length>6?`<div class="meta">ほか ${s.drugs.length-6} 薬品</div>`:''}</div></div>`;
+    }
+    h+=`<div class="btnrow" style="margin-top:10px">
+      <button onclick="rejectCandidates()">別人として初回扱いで保存</button>
+    </div>
+    <p class="footnote">同一患者として選択すると氏名表記の対応が記録され、以後は自動で比較されます。</p></div>`;
     el.innerHTML=h;
     return;
   }
@@ -1016,8 +1099,12 @@ function renderResult(){
     +(cm.demo?'（デモ表示・保存していません）':cm.storedSide==='prev'?'（保存から自動取得）':'')+`</p>
     <p class="sub">前回 ${esc(pd?pd.text:(state.prev.交付年月日||'交付日不明'))}　→　今回 ${esc(cd?cd.text:(state.curr.交付年月日||'交付日不明'))}
        ／ 患者 ${esc((state.curr.patient&&(state.curr.patient.氏名||state.curr.patient.カナ))||'—')}</p>`;
-  if(cm.storedSide==='curr')
+  if(cm.dateUnknown)
+    h+=`<div class="alert warn">交付日が読み取れないため、どちらが新しい処方か判定できません（保存分は維持しています）。表示上の前回・今回は仮の配置です。</div>`;
+  else if(cm.storedSide==='curr')
     h+=`<div class="alert info">いま読み取った処方せんは保存分より古いため、「前回」側として表示しています。「今回」側は保存されていた最新の処方です（保存は変更していません）。</div>`;
+  if(state.prev.補足除外||state.curr.補足除外)
+    h+=`<div class="alert info">一包化・粉砕などの指示・備考は保存対象外のため比較していません。いま読み取った処方せんの指示は下の「処方内容」欄で確認できます。</div>`;
   h+=r.alerts.map(a=>`<div class="alert ${a.level}">${esc(a.text)}</div>`).join('');
   h+=`<div class="counts">
     <div class="count del"><div class="n">${r.counts.del}</div><div class="l">中止（前回のみ）</div></div>
@@ -1149,41 +1236,117 @@ function finalize(t, bytes, parityBad){
 
 /* 読み取った処方せんの処理:
    同一キー（患者×医療機関×診療科）の保存分を探し、
-   無ければ「初回」として保存、有れば交付日で新旧を判定して比較する。 */
+   無ければ「初回」として保存、有れば交付日で新旧を判定して比較する。
+   氏名キー不一致でも生年月日+性別+機関+診療科が一致する保存分があれば、
+   自動比較はせず候補として提示する（修正5）。 */
+let pendingScan=null;   // 候補確認待ち: {rx, keys, cand, candidates:[rec]}
 async function processScanned(rx){
-  let keys=[], found=null, storeOK=true;
+  pendingScan=null;
+  let keys=[], cand='', found=null, candidates=[], storeOK=true;
   try{
+    if(Store.degraded) throw new Error(Store.degraded);
     const salt=await Store.getSalt();
     keys=recordKeys(rx, salt);
-    if(keys.length) found=await Store.findByKeys(keys);
+    cand=candidateKey(rx, salt);
+    if(keys.length){
+      found=await Store.findByKeys(keys);
+      if(!found && cand)
+        candidates=(await Store.all()).filter(r=>r.cand===cand);
+    }
   }catch(e){ storeOK=false; }
 
   const scannedDate=(parseJDate(rx.交付年月日)||{}).key||'';
+
+  /* 保存・比較の対象外（fail-closed含む）の理由を特定して表示 */
+  if(!storeOK || !keys.length){
+    state.prev=null; state.curr=rx;
+    compareMeta={mode:'first', noSave:true};
+    renderResult();
+    if(!storeOK && Store.degraded)
+      msg('scan','保存領域の整理に失敗しているため、保存・自動比較を停止しています（読取と表示のみ）。端末の空き容量を確認し、開き直してください。','err');
+    else if(!storeOK)
+      msg('scan','保存領域を読めないため、保存と自動比較ができません（内容表示のみ）。','err');
+    else if(!parseJDate((rx.patient||{}).生年月日))
+      msg('scan','患者氏名または生年月日が記録されていないため、保存・比較はできません（内容表示のみ）。','warn');
+    else
+      msg('scan','医療機関コードが読み取れないため、履歴保存・自動比較の対象外です（内容表示のみ）。','warn');
+    renderStoreInfo();
+    return;
+  }
+
+  /* 氏名表記違いの候補がある場合は自動判定せず提示（修正5） */
+  if(!found && candidates.length){
+    pendingScan={rx, keys, cand, candidates};
+    state.prev=null; state.curr=rx;
+    compareMeta={mode:'candidates'};
+    renderResult();
+    msg('scan','氏名の表記が異なる保存分が見つかりました。同一患者か確認してください。','warn');
+    renderStoreInfo();
+    return;
+  }
+
   const d=decideScan(found, scannedDate);   // 新旧・初回の判定はこの純関数が唯一の定義
 
   if(d.mode==='first'){
     state.prev=null; state.curr=rx;
-    compareMeta={mode:'first', noSave:(!keys.length || !storeOK)};
+    compareMeta={mode:'first', noSave:!!d.noDate};
     renderResult();
-    if(!storeOK) msg('scan','保存領域を読めないため、保存と自動比較ができません（内容表示のみ）。','err');
-    else if(!keys.length) msg('scan','患者氏名または生年月日が記録されていないため、保存・比較はできません（内容表示のみ）。','warn');
-    else{
-      try{ await saveCurrent(rx, keys, null); msg('scan','初回として保存しました。次回の読取から自動で比較されます。','ok'); }
+    if(d.noDate){
+      msg('scan','交付日が読み取れないため保存しません（次回の新旧判定の基準にできないため）。内容表示のみ行います。','warn');
+    }else{
+      try{ await saveCurrent(rx, keys, null, cand); msg('scan','初回として保存しました。次回の読取から自動で比較されます。','ok'); }
       catch(e){ msg('scan','保存できませんでした（'+(e.name||e)+'）。','err'); }
     }
   }else{
-    const stored=parseJahis(found.text);
-    if(d.scannedRole==='curr'){ state.prev=stored; state.curr=rx; compareMeta={mode:'compare', storedSide:'prev'}; }
-    else                      { state.prev=rx; state.curr=stored; compareMeta={mode:'compare', storedSide:'curr'}; }
-    renderResult();
-    try{
-      await saveCurrent(rx, keys, found);   // 置き換え判定も同じ純関数系（chooseRecord→scannedIsCurrent）
-      msg('scan', d.replaceStored
-        ? '前回処方と比較しました。今回分を保存しました。'
-        : '読み取った処方せんは保存分より古いため、「前回」側として比較しました（保存は最新のまま）。', 'ok');
-    }catch(e){
-      msg('scan','比較は表示しましたが、保存を更新できませんでした（'+(e.name||e)+'）。','err');
-    }
+    await showComparison(rx, keys, cand, found, d);
+  }
+  renderStoreInfo();
+}
+
+/** 保存分との比較表示＋保存更新（通常経路・候補確認後の経路の共通部） */
+async function showComparison(rx, keys, cand, rec, d){
+  const stored=parseJahis(rec.text);
+  stored.補足除外=true;   // 保存分は自由記述（備考・補足）を持たないため、指示の比較は行わない
+  if(d.scannedRole==='curr'){ state.prev=stored; state.curr=rx; compareMeta={mode:'compare', storedSide:'prev', dateUnknown:!!d.dateUnknown}; }
+  else                      { state.prev=rx; state.curr=stored; compareMeta={mode:'compare', storedSide:'curr', dateUnknown:!!d.dateUnknown}; }
+  renderResult();
+  try{
+    await saveCurrent(rx, keys, rec, cand);   // 置き換え判定も同じ純関数系（chooseRecord→scannedIsCurrent）
+    msg('scan', d.dateUnknown
+      ? '交付日が読み取れないため新旧を判定できません。保存分は維持しました。'
+      : d.replaceStored
+      ? '前回処方と比較しました。今回分を保存しました。'
+      : '読み取った処方せんは保存分より古いため、「前回」側として比較しました（保存は最新のまま）。', d.dateUnknown?'warn':'ok');
+  }catch(e){
+    msg('scan','比較は表示しましたが、保存を更新できませんでした（'+(e.name||e)+'）。','err');
+  }
+}
+
+/** 候補確認: 同一患者として選択（修正5）。キーを統合し、以後は自動照合される */
+async function confirmCandidate(recId){
+  if(!pendingScan) return;
+  const {rx, keys, cand, candidates}=pendingScan;
+  const rec=candidates.find(r=>r.id===recId);
+  if(!rec) return;
+  pendingScan=null;
+  const scannedDate=(parseJDate(rx.交付年月日)||{}).key||'';
+  await showComparison(rx, keys, cand, rec, decideScan(rec, scannedDate));
+  renderStoreInfo();
+}
+/** 候補確認: 別人として初回扱いで保存 */
+async function rejectCandidates(){
+  if(!pendingScan) return;
+  const {rx, keys, cand}=pendingScan;
+  pendingScan=null;
+  const scannedDate=(parseJDate(rx.交付年月日)||{}).key||'';
+  state.prev=null; state.curr=rx;
+  compareMeta={mode:'first', noSave:!scannedDate};
+  renderResult();
+  if(!scannedDate){
+    msg('scan','別人として扱います。交付日が読み取れないため保存はしません。','warn');
+  }else{
+    try{ await saveCurrent(rx, keys, null, cand); msg('scan','別人として初回保存しました。','ok'); }
+    catch(e){ msg('scan','保存できませんでした（'+(e.name||e)+'）。','err'); }
   }
   renderStoreInfo();
 }
@@ -1200,7 +1363,8 @@ async function renderStoreInfo(){
       mi='　／　コード表: '+DRUG_MASTER_INFO.source.csvName.replace(/^y_|\.csv$/g,'')+'版（'+DRUG_MASTER_INFO.receiptCount+'件）';
   }catch(e){}
   el.innerHTML=`保存済み <b>${n}</b> 件（患者×医療機関×診療科ごとに直近1回・${Store.KEEP_DAYS}日で自動削除）　／　保存先：${esc(label)}${esc(mi)}`
-    + (Store.mode==='memory' ? '　<span class="src">この開き方では保存が使えません</span>' : '');
+    + (Store.mode==='memory' ? '　<span class="src">この開き方では保存が使えません</span>' : '')
+    + (Store.degraded ? `　<span class="tag del">保存・自動比較を停止中（${esc(Store.degraded)}）</span>` : '');
 }
 async function clearStore(){
   if(!confirm('保存されている前回処方をすべて消去します。よろしいですか？')) return;
@@ -1213,16 +1377,49 @@ async function clearStore(){
 async function exportData(){
   const recs=await Store.all(), salt=await Store.getSalt();
   const json=JSON.stringify({format:'shohousen-kansa/1', salt, records:recs});
-  document.getElementById('bakTitle').textContent='保存データの書き出し';
+  document.getElementById('bakTitle').textContent='保存データの書き出し（要保護データ）';
   document.getElementById('bakHint').textContent=
-    `保存 ${recs.length} 件分です。［コピー］して、メモアプリ等に控えてください。`+
-    `別の端末で使うときは、この画面の［読み込み］に貼り付けます。患者氏名は含まれていません。`;
+    `保存 ${recs.length} 件分です。処方内容と照合用の鍵・塩を含む「要保護データ」です。`+
+    `氏名そのものは含まれませんが匿名データではないため、患者情報と同じ扱いで保管し、`+
+    `不要になったら控えごと削除してください。別の端末で使うときは［読み込み］に貼り付けます。`;
   const ta=document.getElementById('bakArea');
   ta.value=json; ta.readOnly=true;
   document.getElementById('bakImportBtn').classList.add('hidden');
   document.getElementById('bakCopyBtn').classList.remove('hidden');
   document.getElementById('bakMsg').textContent='';
   document.getElementById('bakDlg').showModal();
+}
+
+/* ---------- バックアップ取込の検証（第1回監査指摘・修正3） ----------
+   取込は保存最小化の迂回路になるため、全件を検証し text を改めて
+   stripForStorage に通してから原子的に置換する。1件でも不正なら全体を拒否。 */
+const HEX64=/^[0-9a-f]{64}$/, HEX32=/^[0-9a-f]{32}$/, DATE8=/^\d{8}$/;
+function validateBackup(data){
+  if(!data || data.format!=='shohousen-kansa/1') return {ok:false, error:'書き出しデータの形式ではありません'};
+  if(typeof data.salt!=='string' || !HEX32.test(data.salt)) return {ok:false, error:'塩(salt)が不正です'};
+  if(!Array.isArray(data.records)) return {ok:false, error:'records がありません'};
+  if(data.records.length>100000) return {ok:false, error:'件数が多すぎます'};
+  const ids=new Set(), out=[];
+  for(let i=0;i<data.records.length;i++){
+    const r=data.records[i], at=(i+1)+'件目';
+    if(!r || typeof r!=='object') return {ok:false, error:at+': レコードが不正です'};
+    if(typeof r.id!=='string' || !r.id || ids.has(r.id)) return {ok:false, error:at+': id が不正または重複しています'};
+    ids.add(r.id);
+    if(!Array.isArray(r.keys) || !r.keys.length || !r.keys.every(k=>typeof k==='string'&&HEX64.test(k)))
+      return {ok:false, error:at+': 照合キーが不正です'};
+    if(typeof r.date!=='string' || !DATE8.test(r.date))
+      return {ok:false, error:at+': 交付日が不正です（旧形式の書き出しは取り込めません）'};
+    if(typeof r.savedAt!=='number' || !isFinite(r.savedAt) || r.savedAt<=0)
+      return {ok:false, error:at+': 保存日時が不正です'};
+    if(r.cand!==undefined && !(typeof r.cand==='string' && (r.cand===''||HEX64.test(r.cand))))
+      return {ok:false, error:at+': 候補キーが不正です'};
+    if(typeof r.text!=='string' || !r.text)
+      return {ok:false, error:at+': 処方データがありません'};
+    // 許可レコードのみに再strip（迂回で氏名等が紛れていても、ここで確実に落ちる）
+    out.push({id:r.id, keys:[...r.keys], cand:r.cand||'', date:r.date, savedAt:r.savedAt,
+              text:stripForStorage(r.text)});
+  }
+  return {ok:true, records:out, salt:data.salt};
 }
 function importData(){
   document.getElementById('bakTitle').textContent='保存データの読み込み';
@@ -1243,15 +1440,16 @@ async function bakCopy(){
 async function bakImport(){
   const m=document.getElementById('bakMsg');
   try{
-    const data=JSON.parse(document.getElementById('bakArea').value);
-    if(data.format!=='shohousen-kansa/1' || !Array.isArray(data.records)) throw new Error('書き出しデータの形式ではありません');
-    if(!confirm(`書き出しデータ ${data.records.length} 件を取り込みます。\n現在の保存はすべて置き換わります。よろしいですか？`)) return;
-    await Store.clear();
-    for(const r of data.records) await Store.putRec(r);
-    await Store.setSalt(data.salt);
+    let data;
+    try{ data=JSON.parse(document.getElementById('bakArea').value); }
+    catch(e){ throw new Error('JSONとして読めません'); }
+    const v=validateBackup(data);
+    if(!v.ok) throw new Error(v.error+'（1件でも不正な場合は全体を取り込みません）');
+    if(!confirm(`書き出しデータ ${v.records.length} 件を取り込みます。\n現在の保存はすべて置き換わります。よろしいですか？`)) return;
+    await Store.replaceAll(v.records, v.salt);   // 原子的に置換（部分取込しない）
     renderStoreInfo();
     document.getElementById('bakDlg').close();
-    msg('scan',`保存データを読み込みました（${data.records.length} 件）。`,'ok');
+    msg('scan',`保存データを読み込みました（${v.records.length} 件）。`,'ok');
   }catch(err){
     m.textContent='取り込めませんでした：'+(err.message||err);
   }
@@ -1471,7 +1669,7 @@ function applyText(){
 
 /* ---------- 操作 ---------- */
 function clearAll(){
-  state.prev=null; state.curr=null; compareMeta=null;
+  state.prev=null; state.curr=null; compareMeta=null; pendingScan=null;
   sessions.scan=newSession();
   renderSlots('scan'); clearMsg('scan'); renderResult();
 }

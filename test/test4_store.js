@@ -21,7 +21,7 @@ ok(sha256hex('abc')==='ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f
 ok(sha256hex('x').length===64, '出力は64桁の16進');
 
 // --- 患者鍵 ---
-const mk=(name,kana,birth,sex)=>parseJahis(['JAHIS10',`11,,${name},${kana}`,`12,${sex}`,`13,${birth}`,'51,20260313',
+const mk=(name,kana,birth,sex)=>parseJahis(['JAHIS10','1,1,1234567,13,Ｔ病院',`11,,${name},${kana}`,`12,${sex}`,`13,${birth}`,'51,20260313',
   '101,1,1,,28','111,1,1,,１日１回朝食後,1','201,1,1,1,2,612170709,ノルバスク錠２．５ｍｇ,1,1,錠'].join('\r\n'));
 const S='saltsalt';
 const A=recordKeys(mk('日薬 太郎','ﾆﾁﾔｸ ﾀﾛｳ','19600606','1'), S);
@@ -58,7 +58,7 @@ ok(chooseRecord(null,'20260313')==='save', '保存がなければ保存する');
 ok(chooseRecord({date:'20260213'},'20260313')==='save', '今回の方が新しければ上書きする');
 ok(chooseRecord({date:'20260313'},'20260213')==='keep', '前回処方をあとから読んでも上書きしない');
 ok(chooseRecord({date:'20260313'},'20260313')==='save', '同じ交付日なら読み直しを反映する');
-ok(chooseRecord({date:''},'20260313')==='save', '保存側に交付日がなければ保存する');
+ok(chooseRecord({date:''},'20260313')==='keep', '保存側に交付日がなければ置き換えない（新旧判定不能・監査修正2）');
 
 /* --- 医療機関×診療科でキーが分かれる --- */
 const mkRx=(extra)=>parseJahis(['JAHIS10', ...extra,

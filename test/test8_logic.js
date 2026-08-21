@@ -17,9 +17,9 @@ let fail=0; const ok=(c,m)=>{console.log((c?'PASS':'FAIL')+'  '+m); if(!c)fail++
 ok(scannedIsCurrent('20260213','20260313')===true,  '読んだ方が新しい → 今回');
 ok(scannedIsCurrent('20260313','20260213')===false, '読んだ方が古い → 前回');
 ok(scannedIsCurrent('20260313','20260313')===true,  '同日 → 読んだ方が今回');
-ok(scannedIsCurrent('','20260313')===true,          '保存側の日付不明 → 読んだ方が今回');
-ok(scannedIsCurrent('20260313','')===true,          '読んだ方の日付不明 → 読んだ方が今回');
-ok(scannedIsCurrent('','')===true,                  '両方不明 → 読んだ方が今回');
+ok(scannedIsCurrent('','20260313')===false,         '保存側の日付不明 → 新旧を確定しない（監査修正2）');
+ok(scannedIsCurrent('20260313','')===false,         '読んだ方の日付不明 → 新旧を確定しない');
+ok(scannedIsCurrent('','')===false,                 '両方不明 → 新旧を確定しない');
 
 /* ---------- decideScan: 画面の役割分担と保存の置き換え ---------- */
 ok(decideScan(null,'20260313').mode==='first', '保存なし → 初回');
@@ -32,18 +32,23 @@ ok(d.mode==='compare' && d.scannedRole==='prev' && d.replaceStored===false,
 d=decideScan({date:'20260313'},'20260313');
 ok(d.scannedRole==='curr' && d.replaceStored===true, '同日: 読んだ方=今回・読み直しを反映');
 d=decideScan({date:''},'20260313');
-ok(d.scannedRole==='curr' && d.replaceStored===true, '保存側日付なし: 読んだ方=今回');
+ok(d.dateUnknown===true && d.replaceStored===false, '保存側日付なし: 判定不能扱いで置き換えない');
+d=decideScan({date:'20260313'},'');
+ok(d.dateUnknown===true && d.replaceStored===false, '読んだ方日付なし: 判定不能扱いで置き換えない');
+ok(decideScan(null,'').noDate===true, '初回かつ日付なし: noDate（保存しない）');
+ok(chooseRecord(null,'')==='keep', '初回でも交付日不明は保存しない');
 
 /* ---------- 画面の役割と保存の置き換えが常に一致する（食い違い禁止の不変条件） ---------- */
 const dates=['','20250101','20260213','20260313','20261231'];
 let consistent=true;
-for(const s of dates) for(const c of dates){
-  const dd=decideScan({date:s}, c);
-  const save=chooseRecord({date:s}, c)==='save';
-  if(dd.replaceStored!==save) consistent=false;
-  if((dd.scannedRole==='curr')!==dd.replaceStored) consistent=false;
+for(const sd of dates) for(const c of dates){
+  const dd=decideScan({date:sd}, c);
+  const save=chooseRecord({date:sd}, c)==='save';
+  if(dd.replaceStored!==save) consistent=false;                    // 画面の置換予告と保存の実際が一致
+  if(dd.replaceStored && dd.scannedRole!=='curr') consistent=false; // 置き換えるなら読んだ方が今回
+  if(dd.dateUnknown && dd.replaceStored) consistent=false;          // 判定不能なのに置き換えは禁止
 }
-ok(consistent, '全date組合せで「画面の今回扱い」⇔「保存の置き換え」が一致する（25通り）');
+ok(consistent, '全date組合せで「保存の置き換え」と画面表示が矛盾しない（25通り）');
 
 /* ---------- purgeDue: 90日purge対象判定 ---------- */
 const DAY=86400000, now=1770000000000;
