@@ -10913,12 +10913,38 @@ function stripForStorage(raw){
     }).join('\r\n')+'\r\n';
 }
 
+/* ---------- 比較ロジックの純関数（UI・保存層から独立、テストで固定） ----------
+   新旧の規則はここが唯一の定義。画面の役割分担（processScanned）と
+   保存の置き換え判定（chooseRecord）の両方がここを参照するため、
+   「画面では今回扱いなのに保存は置き換えない」といった食い違いは起きない。 */
+
+/** 読んだ処方せんを「今回」とするか。交付日(YYYYMMDDのキー文字列)で判定。
+ *  同日は読んだ方が今回（読取時刻が新しいため）。どちらかの日付が不明な場合も
+ *  読んだ方を今回とする（実物が手元にある方を優先する）。 */
+function scannedIsCurrent(storedDate, scannedDate){
+  if(!storedDate || !scannedDate) return true;
+  return scannedDate >= storedDate;
+}
+
+/** 保存レコード（無ければnull）と読取交付日から、画面と保存の扱いを決める。
+ *  戻り値: {mode:'first'}
+ *        | {mode:'compare', scannedRole:'curr'|'prev', replaceStored:boolean} */
+function decideScan(existing, scannedDate){
+  if(!existing) return {mode:'first'};
+  const cur=scannedIsCurrent(existing.date, scannedDate);
+  return {mode:'compare', scannedRole:cur?'curr':'prev', replaceStored:cur};
+}
+
+/** 保存期限切れ（purge対象）か。savedAt はエポックms。記録が無いものも対象 */
+function purgeDue(rec, now, keepDays){
+  return !rec.savedAt || rec.savedAt < now - keepDays*86400000;
+}
+
 /** 既存の保存分と今読んだ分の、どちらを保存として残すかを決める。
  *  交付日が新しい方を残す（前回処方をあとから読んでも上書きしない）。 */
 function chooseRecord(existing, incomingDate){
   if(!existing) return 'save';
-  if(!existing.date || !incomingDate) return 'save';
-  return incomingDate >= existing.date ? 'save' : 'keep';
+  return scannedIsCurrent(existing.date, incomingDate) ? 'save' : 'keep';
 }
 
 const Store=(function(){
@@ -10976,8 +11002,8 @@ const Store=(function(){
   async function housekeeping(){
     try{
       if(await metaGet('schema')!==SCHEMA){ await clear(); await metaSet('schema',SCHEMA); }
-      const cutoff=Date.now()-KEEP_DAYS*86400000;
-      for(const r of await all()) if(!r.savedAt || r.savedAt<cutoff) await delRec(r.id);
+      const now=Date.now();
+      for(const r of await all()) if(purgeDue(r, now, KEEP_DAYS)) await delRec(r.id);
     }catch(e){}
   }
   function flush(){ if(mode==='local'){ try{ localStorage.setItem(LSKEY, JSON.stringify(mem)); }catch(e){} } }
@@ -11285,8 +11311,9 @@ async function processScanned(rx){
   }catch(e){ storeOK=false; }
 
   const scannedDate=(parseJDate(rx.交付年月日)||{}).key||'';
+  const d=decideScan(found, scannedDate);   // 新旧・初回の判定はこの純関数が唯一の定義
 
-  if(!found){
+  if(d.mode==='first'){
     state.prev=null; state.curr=rx;
     compareMeta={mode:'first', noSave:(!keys.length || !storeOK)};
     renderResult();
@@ -11298,14 +11325,12 @@ async function processScanned(rx){
     }
   }else{
     const stored=parseJahis(found.text);
-    // 交付日で新旧を判定。同日はいま読んだ方を「今回」とする（読取時刻が新しいため）
-    const scannedIsNew = !found.date || !scannedDate || scannedDate>=found.date;
-    if(scannedIsNew){ state.prev=stored; state.curr=rx; compareMeta={mode:'compare', storedSide:'prev'}; }
-    else            { state.prev=rx; state.curr=stored; compareMeta={mode:'compare', storedSide:'curr'}; }
+    if(d.scannedRole==='curr'){ state.prev=stored; state.curr=rx; compareMeta={mode:'compare', storedSide:'prev'}; }
+    else                      { state.prev=rx; state.curr=stored; compareMeta={mode:'compare', storedSide:'curr'}; }
     renderResult();
     try{
-      await saveCurrent(rx, keys, found);   // 交付日が新しい方だけが保存に残る
-      msg('scan', scannedIsNew
+      await saveCurrent(rx, keys, found);   // 置き換え判定も同じ純関数系（chooseRecord→scannedIsCurrent）
+      msg('scan', d.replaceStored
         ? '前回処方と比較しました。今回分を保存しました。'
         : '読み取った処方せんは保存分より古いため、「前回」側として比較しました（保存は最新のまま）。', 'ok');
     }catch(e){
