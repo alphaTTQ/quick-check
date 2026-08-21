@@ -135,7 +135,7 @@ const RX=(hospLine, patient, date)=>['JAHIS10',hospLine,'4,2,01,内科',...patie
   const rawWithName='JAHIS10\r\n1,1,1234567,13,Ａ病院\r\n11,,日薬 太郎,\r\n13,19600606\r\n51,20260313\r\n'+
     '101,1,1,,28\r\n111,1,1,,１日１回朝食後,1\r\n81,1,,患者メモ\r\n201,1,1,1,2,612170709,ノルバスク錠２．５ｍｇ,1,1,錠\r\n';
   const good={format:'shohousen-kansa/1', salt, records:[
-    {id:'r1', keys:[k1], cand:'', date:'20260313', savedAt:Date.now(), text:rawWithName}]};
+    {id:k1, keys:[k1], cand:'', date:'20260313', savedAt:Date.now(), text:rawWithName}]};
   doc.getElementById('bakArea').value=JSON.stringify(good);
   await bakImport();
   let recs=await Store.all();
@@ -143,16 +143,16 @@ const RX=(hospLine, patient, date)=>['JAHIS10',hospLine,'4,2,01,内科',...patie
   ok(!recs[0].text.includes('日薬') && !recs[0].text.includes('19600606') && !recs[0].text.includes('患者メモ'),
      '3-2. 取込時に再stripされ、氏名・生年月日・自由記述が保存に入らない');
   const bad=JSON.parse(JSON.stringify(good));
-  bad.records.push({id:'r2', keys:['not-hex'], date:'20260101', savedAt:1, text:'JAHIS10\r\n'});
+  bad.records.push({id:'b'.repeat(64), keys:['not-hex'], date:'20260101', savedAt:1, text:'JAHIS10\r\n'});
   doc.getElementById('bakArea').value=JSON.stringify(bad);
   await bakImport();
   recs=await Store.all();
-  ok(recs.length===1 && recs[0].id==='r1', '3-3. 不正1件を含むバックアップは全体拒否（部分取込しない）');
+  ok(recs.length===1 && recs[0].id===k1, '3-3. 不正1件を含むバックアップは全体拒否（部分取込しない）');
   const old=JSON.parse(JSON.stringify(good));
-  old.records[0]={id:'r3', keys:[k1], date:'', savedAt:Date.now(), text:'JAHIS10\r\n'};   // 旧形式(交付日なし)
+  old.records[0]={id:'c'.repeat(64), keys:['b'.repeat(64)], date:'', savedAt:Date.now(), text:'JAHIS10\r\n'};   // 旧形式(交付日なし)
   doc.getElementById('bakArea').value=JSON.stringify(old);
   await bakImport();
-  ok((await Store.all())[0].id==='r1', '3-4. 交付日なしの旧形式レコードは拒否される');
+  ok((await Store.all())[0].id===k1, '3-4. 交付日なしの旧形式レコードは拒否される');
 
   /* ===== 修正4: housekeeping失敗のfail-closed ===== */
   Store._test.failHousekeeping=true;

@@ -2,7 +2,7 @@
 const fs=require('fs'), vm=require('vm'), crypto=require('crypto');
 const html=fs.readFileSync(require('path').join(__dirname,'..','index.html'),'utf8');
 // マスタデータのスクリプトを取り出す
-const mm=html.match(/var DRUG_MASTER_RAW ?= ?[\s\S]*?;\n/);
+const mm=html.match(/var DRUG_MASTER_RAW ?= ?[\s\S]*?;\r?\n/);
 const app=html.slice(html.lastIndexOf('<script>')+8, html.lastIndexOf('</script>'));
 const core=app.slice(0, app.lastIndexOf('/* ===', app.indexOf('4. 画面描画')));
 const ctx={console,TextDecoder,TextEncoder,crypto:{getRandomValues:a=>crypto.randomFillSync(a)}};

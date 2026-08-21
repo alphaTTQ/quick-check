@@ -786,6 +786,28 @@ function stripForStorage(raw){
    保存の置き換え判定（chooseRecord）の両方がここを参照するため、
    「画面では今回扱いなのに保存は置き換えない」といった食い違いは起きない。 */
 
+/** 交付日の厳格な検証: 実在する暦日のみ比較キー(YYYYMMDD)にする。
+ *  表示用の parseJDate は年のみ・年月のみ等も受けるが、新旧判定・保存には
+ *  使わない —— 「20269999」のような非実在日付が一度保存されると、以後の
+ *  正常な処方が常に「古い」と判定され続けるため（第2回監査指摘3）。 */
+function strictDateKey(v){
+  v=String(v==null?'':v).trim();
+  let y,m,d;
+  if(/^\d{8}$/.test(v)){ y=+v.slice(0,4); m=+v.slice(4,6); d=+v.slice(6,8); }
+  else if(/^\d{7}$/.test(v)){                       // 和暦 GYYMMDD
+    const e=ERA[v[0]]; if(!e) return '';
+    y=e.b + (+v.slice(1,3)) - 1; m=+v.slice(3,5); d=+v.slice(5,7);
+  }
+  else return '';
+  if(y<1926 || y>2100 || m<1 || m>12) return '';
+  const leap=(y%4===0 && y%100!==0) || y%400===0;
+  const mlen=[31, leap?29:28, 31,30,31,30,31,31,30,31,30,31][m-1];
+  if(d<1 || d>mlen) return '';
+  return String(y).padStart(4,'0')+String(m).padStart(2,'0')+String(d).padStart(2,'0');
+}
+/** 処方せんの交付日キー。実在日付でなければ ''（＝交付日不明として扱う） */
+function issueDateKey(rx){ return strictDateKey(rx.交付年月日); }
+
 /** 読んだ処方せんを「今回」と確定できるか。交付日(YYYYMMDDのキー文字列)で判定。
  *  同日は読んだ方が今回（読取時刻が新しいため）。
  *  **どちらかの日付が不明なら false**＝新旧を判定できない（第1回監査指摘・修正2。
@@ -828,8 +850,25 @@ const Store=(function(){
   let degraded=null;   // housekeeping失敗時に理由が入る。非nullの間は保存・自動比較を止める
 
   function idbReq(r){ return new Promise((res,rej)=>{ r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); }
+  /** トランザクション完了待ち。abort/errorを必ずrejectする（第2回監査指摘1。
+   *  oncompleteだけ待つと、容量超過等でabortしてもPromiseが未解決のまま
+   *  「成功したように見える」）。全ての更新系処理はこれを使うこと。 */
+  function txDone(tx){
+    return new Promise((res,rej)=>{
+      tx.oncomplete=()=>res();
+      tx.onerror =()=>rej(tx.error||new Error('保存領域の書き込みに失敗しました'));
+      tx.onabort =()=>rej(tx.error||new Error('保存領域の書き込みが中断されました（容量不足の可能性）'));
+    });
+  }
 
-  async function init(){
+  let initPromise=null;
+  function init(){ initPromise=doInit(); return initPromise; }
+  /** init完了待ち。initが呼ばれていない・失敗した場合はreject（readyガード） */
+  function ready(){
+    return initPromise || Promise.reject(new Error('保存領域が未初期化です'));
+  }
+
+  async function doInit(){
     try{
       db=await new Promise((res,rej)=>{
         const rq=indexedDB.open(DBNAME,VER);
@@ -873,7 +912,7 @@ const Store=(function(){
     if(mode==='idb'){
       const tx=db.transaction('meta','readwrite');
       tx.objectStore('meta').put(v,k);
-      return new Promise(res=>{ tx.oncomplete=()=>res(); });
+      return txDone(tx);
     }
     mem['meta_'+k]=v; flush();
   }
@@ -895,20 +934,25 @@ const Store=(function(){
       tx.objectStore(ST).clear();
       for(const r of recs) tx.objectStore(ST).put(r);
       if(salt) tx.objectStore('meta').put(salt,'salt');
-      return new Promise((res,rej)=>{ tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); tx.onabort=()=>rej(tx.error||new Error('aborted')); });
+      return txDone(tx);
     }
     const next={};
     for(const r of recs) next[r.id]=r;
     mem.recs=next; if(salt) mem.salt=salt;
     flush();
   }
-  function flush(){ if(mode==='local'){ try{ localStorage.setItem(LSKEY, JSON.stringify(mem)); }catch(e){} } }
+  function flush(){
+    if(mode!=='local') return;
+    try{ localStorage.setItem(LSKEY, JSON.stringify(mem)); }
+    catch(e){ throw new Error('localStorageへの書き込みに失敗しました（容量不足の可能性）'); }
+  }
 
   async function getSalt(){
     if(mode==='idb'){
       const tx=db.transaction('meta','readwrite');
       let s=await idbReq(tx.objectStore('meta').get('salt'));
       if(!s){ s=randomSalt(); tx.objectStore('meta').put(s,'salt'); }
+      await txDone(tx);
       return s;
     }
     if(!mem.salt){ mem.salt=randomSalt(); flush(); }
@@ -920,7 +964,7 @@ const Store=(function(){
     if(mode==='idb'){
       const tx=db.transaction('meta','readwrite');
       tx.objectStore('meta').put(s,'salt');
-      return new Promise(res=>{ tx.oncomplete=()=>res(); });
+      return txDone(tx);
     }
     mem.salt=s; flush();
   }
@@ -945,7 +989,7 @@ const Store=(function(){
     if(mode==='idb'){
       const tx=db.transaction(ST,'readwrite');
       tx.objectStore(ST).put(rec);
-      return new Promise((res,rej)=>{ tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); });
+      return txDone(tx);
     }
     mem.recs[rec.id]=rec; flush();
   }
@@ -953,7 +997,7 @@ const Store=(function(){
     if(mode==='idb'){
       const tx=db.transaction(ST,'readwrite');
       tx.objectStore(ST).delete(id);
-      return new Promise(res=>{ tx.oncomplete=()=>res(); });
+      return txDone(tx);
     }
     delete mem.recs[id]; flush();
   }
@@ -965,11 +1009,11 @@ const Store=(function(){
     if(mode==='idb'){
       const tx=db.transaction(ST,'readwrite');
       tx.objectStore(ST).clear();
-      return new Promise(res=>{ tx.oncomplete=()=>res(); });
+      return txDone(tx);
     }
     mem.recs={}; flush();
   }
-  const api={init, getSalt, setSalt, findByKeys, putRec, delRec, all, clear, replaceAll,
+  const api={init, ready, getSalt, setSalt, findByKeys, putRec, delRec, all, clear, replaceAll,
           get mode(){ return mode; },
           get degraded(){ return degraded; },
           KEEP_DAYS,
@@ -982,7 +1026,7 @@ const Store=(function(){
  *  —— カナ⇔漢字の手動確認後の統合（修正5）もこの経路で永続化される。 */
 async function saveCurrent(rx, keys, existing, cand){
   if(!keys.length) return {saved:false, reason:'照合キーを作れないため保存できません。'};
-  const date=(parseJDate(rx.交付年月日)||{}).key||'';
+  const date=issueDateKey(rx);
   const merged=[...new Set([...keys, ...(existing?existing.keys||[]:[])])];
   const mergedCand=(existing&&existing.cand)||cand||'';
   if(chooseRecord(existing, date)==='keep'){
@@ -1070,17 +1114,17 @@ function renderResult(){
       読み取った処方せん（${esc((rx.patient&&(rx.patient.氏名||rx.patient.カナ))||'—')}
       ／ ${esc(rxKeyText(rx))}）と、生年月日・性別・医療機関・診療科が一致します。
       カナ・漢字の表記違いで同一患者の可能性があります。自動では比較しません。</div>`;
-    for(const rec of pendingScan.candidates){
+    pendingScan.candidates.forEach((rec,i)=>{
       const s=parseJahis(rec.text);
       const sd=parseJDate(s.交付年月日);
       h+=`<div class="rp"><div class="rp-head">
         <span>保存分: ${esc(sd?sd.text:'交付日不明')}交付　${esc(s.rps.length)}剤 ${esc(s.drugs.length)}薬品</span>
-        <span><button class="primary" onclick="confirmCandidate('${esc(rec.id)}')">同一患者として比較</button></span>
+        <span><button class="primary" data-cand-idx="${i}">同一患者として比較</button></span>
         </div><div class="rp-body">${s.drugs.slice(0,6).map(d=>`<div class="rp-drug">${esc(d.名称||'（名称なし）')}　${esc(doseText(d))}</div>`).join('')}
         ${s.drugs.length>6?`<div class="meta">ほか ${s.drugs.length-6} 薬品</div>`:''}</div></div>`;
-    }
+    });
     h+=`<div class="btnrow" style="margin-top:10px">
-      <button onclick="rejectCandidates()">別人として初回扱いで保存</button>
+      <button data-cand-reject="1">別人として初回扱いで保存</button>
     </div>
     <p class="footnote">同一患者として選択すると氏名表記の対応が記録され、以後は自動で比較されます。</p></div>`;
     el.innerHTML=h;
@@ -1244,6 +1288,7 @@ async function processScanned(rx){
   pendingScan=null;
   let keys=[], cand='', found=null, candidates=[], storeOK=true;
   try{
+    await Store.ready();                       // 初期化完了前は保存・自動比較を許可しない
     if(Store.degraded) throw new Error(Store.degraded);
     const salt=await Store.getSalt();
     keys=recordKeys(rx, salt);
@@ -1255,7 +1300,7 @@ async function processScanned(rx){
     }
   }catch(e){ storeOK=false; }
 
-  const scannedDate=(parseJDate(rx.交付年月日)||{}).key||'';
+  const scannedDate=issueDateKey(rx);
 
   /* 保存・比較の対象外（fail-closed含む）の理由を特定して表示 */
   if(!storeOK || !keys.length){
@@ -1329,7 +1374,7 @@ async function confirmCandidate(recId){
   const rec=candidates.find(r=>r.id===recId);
   if(!rec) return;
   pendingScan=null;
-  const scannedDate=(parseJDate(rx.交付年月日)||{}).key||'';
+  const scannedDate=issueDateKey(rx);
   await showComparison(rx, keys, cand, rec, decideScan(rec, scannedDate));
   renderStoreInfo();
 }
@@ -1338,7 +1383,7 @@ async function rejectCandidates(){
   if(!pendingScan) return;
   const {rx, keys, cand}=pendingScan;
   pendingScan=null;
-  const scannedDate=(parseJDate(rx.交付年月日)||{}).key||'';
+  const scannedDate=issueDateKey(rx);
   state.prev=null; state.curr=rx;
   compareMeta={mode:'first', noSave:!scannedDate};
   renderResult();
@@ -1375,6 +1420,7 @@ async function clearStore(){
    埋め込み表示（アーティファクト）ではページ発のファイルダウンロードが
    ブロックされるため、<a download> に頼らない。ファイル読み込みは可能なので残す。 */
 async function exportData(){
+  try{ await Store.ready(); }catch(e){ msg('scan','保存領域の初期化が完了していないため、書き出しできません。','err'); return; }
   const recs=await Store.all(), salt=await Store.getSalt();
   const json=JSON.stringify({format:'shohousen-kansa/1', salt, records:recs});
   document.getElementById('bakTitle').textContent='保存データの書き出し（要保護データ）';
@@ -1393,33 +1439,51 @@ async function exportData(){
 /* ---------- バックアップ取込の検証（第1回監査指摘・修正3） ----------
    取込は保存最小化の迂回路になるため、全件を検証し text を改めて
    stripForStorage に通してから原子的に置換する。1件でも不正なら全体を拒否。 */
-const HEX64=/^[0-9a-f]{64}$/, HEX32=/^[0-9a-f]{32}$/, DATE8=/^\d{8}$/;
-function validateBackup(data){
+const HEX64=/^[0-9a-f]{64}$/, HEX32=/^[0-9a-f]{32}$/;
+function validateBackup(data, now){
+  now = now===undefined ? Date.now() : now;
   if(!data || data.format!=='shohousen-kansa/1') return {ok:false, error:'書き出しデータの形式ではありません'};
   if(typeof data.salt!=='string' || !HEX32.test(data.salt)) return {ok:false, error:'塩(salt)が不正です'};
   if(!Array.isArray(data.records)) return {ok:false, error:'records がありません'};
   if(data.records.length>100000) return {ok:false, error:'件数が多すぎます'};
-  const ids=new Set(), out=[];
+  const ids=new Set(), allKeys=new Set(), out=[];
+  let skippedExpired=0;
   for(let i=0;i<data.records.length;i++){
     const r=data.records[i], at=(i+1)+'件目';
     if(!r || typeof r!=='object') return {ok:false, error:at+': レコードが不正です'};
-    if(typeof r.id!=='string' || !r.id || ids.has(r.id)) return {ok:false, error:at+': id が不正または重複しています'};
+    // id は照合キー由来の64桁16進のみ（任意文字列を許すと表示層への注入原資になる。第2回監査指摘2）
+    if(typeof r.id!=='string' || !HEX64.test(r.id) || ids.has(r.id))
+      return {ok:false, error:at+': id が不正または重複しています'};
     ids.add(r.id);
-    if(!Array.isArray(r.keys) || !r.keys.length || !r.keys.every(k=>typeof k==='string'&&HEX64.test(k)))
+    if(!Array.isArray(r.keys) || !r.keys.length || r.keys.length>8 ||
+       !r.keys.every(k=>typeof k==='string'&&HEX64.test(k)))
       return {ok:false, error:at+': 照合キーが不正です'};
-    if(typeof r.date!=='string' || !DATE8.test(r.date))
-      return {ok:false, error:at+': 交付日が不正です（旧形式の書き出しは取り込めません）'};
+    for(const k of r.keys){
+      if(allKeys.has(k)) return {ok:false, error:at+': 照合キーが他のレコードと重複しています（誤比較の原因になるため拒否）'};
+      allKeys.add(k);
+    }
+    if(typeof r.date!=='string' || strictDateKey(r.date)!==r.date)
+      return {ok:false, error:at+': 交付日が実在する日付ではありません'};
     if(typeof r.savedAt!=='number' || !isFinite(r.savedAt) || r.savedAt<=0)
       return {ok:false, error:at+': 保存日時が不正です'};
+    if(r.savedAt > now + 60000)
+      return {ok:false, error:at+': 保存日時が未来です（purgeを無期限に回避できるため拒否）'};
     if(r.cand!==undefined && !(typeof r.cand==='string' && (r.cand===''||HEX64.test(r.cand))))
       return {ok:false, error:at+': 候補キーが不正です'};
     if(typeof r.text!=='string' || !r.text)
       return {ok:false, error:at+': 処方データがありません'};
     // 許可レコードのみに再strip（迂回で氏名等が紛れていても、ここで確実に落ちる）
+    const stripped=stripForStorage(r.text);
+    // text と メタデータの整合: strip後もJAHISとして解析でき、交付日が一致すること
+    const parsed=parseJahis(stripped);
+    if(parsed.errors.length || issueDateKey(parsed)!==r.date)
+      return {ok:false, error:at+': 処方データと交付日が一致しません'};
+    // 保存期限切れは取り込まない（次回起動でpurgeされるだけのデータを持ち込まない）
+    if(purgeDue(r, now, Store.KEEP_DAYS)){ skippedExpired++; continue; }
     out.push({id:r.id, keys:[...r.keys], cand:r.cand||'', date:r.date, savedAt:r.savedAt,
-              text:stripForStorage(r.text)});
+              text:stripped});
   }
-  return {ok:true, records:out, salt:data.salt};
+  return {ok:true, records:out, salt:data.salt, skippedExpired};
 }
 function importData(){
   document.getElementById('bakTitle').textContent='保存データの読み込み';
@@ -1443,13 +1507,15 @@ async function bakImport(){
     let data;
     try{ data=JSON.parse(document.getElementById('bakArea').value); }
     catch(e){ throw new Error('JSONとして読めません'); }
+    await Store.ready();
     const v=validateBackup(data);
     if(!v.ok) throw new Error(v.error+'（1件でも不正な場合は全体を取り込みません）');
-    if(!confirm(`書き出しデータ ${v.records.length} 件を取り込みます。\n現在の保存はすべて置き換わります。よろしいですか？`)) return;
+    const skipNote=v.skippedExpired?`\n（保存期限切れ ${v.skippedExpired} 件は取り込みません）`:'';
+    if(!confirm(`書き出しデータ ${v.records.length} 件を取り込みます。${skipNote}\n現在の保存はすべて置き換わります。よろしいですか？`)) return;
     await Store.replaceAll(v.records, v.salt);   // 原子的に置換（部分取込しない）
     renderStoreInfo();
     document.getElementById('bakDlg').close();
-    msg('scan',`保存データを読み込みました（${v.records.length} 件）。`,'ok');
+    msg('scan',`保存データを読み込みました（${v.records.length} 件`+(v.skippedExpired?`・期限切れ${v.skippedExpired}件は除外`:'')+`）。`,'ok');
   }catch(err){
     m.textContent='取り込めませんでした：'+(err.message||err);
   }
@@ -1710,6 +1776,16 @@ function loadDemo(){
 
 renderResult();
 Store.init().then(renderStoreInfo).catch(()=>renderStoreInfo());
+
+// 候補確認ボタンの委譲リスナー（インラインonclickは使わない。第2回監査指摘2:
+// 保存レコードのidを属性値としてHTMLに埋め込まず、pendingScan内の添字で対応付ける）
+document.getElementById('result').addEventListener('click', e=>{
+  const t=e.target && e.target.closest ? e.target.closest('button[data-cand-idx],button[data-cand-reject]') : null;
+  if(!t || !pendingScan) return;
+  if(t.hasAttribute('data-cand-reject')){ rejectCandidates(); return; }
+  const rec=pendingScan.candidates[+t.getAttribute('data-cand-idx')];
+  if(rec) confirmCandidate(rec.id);
+});
 
 // 端末・開き方に応じて、使える読取方法を案内する
 // （ライブカメラは https か localhost でしか使えない。スマホはファイル選択から
