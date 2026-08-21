@@ -182,7 +182,7 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
     <p class="sub">院外処方せん2次元シンボル（JAHIS Ver.1.10 / QRコード Model2・Shift-JIS）を読み取って差分を突合します。</p>
   </div>
   <div class="noprint" style="text-align:right">
-    <span class="privacy">通信しない設計です（CSPで外部送信を遮断）。データはこのページを閉じると消えます。</span>
+    <span class="privacy">通信しない設計です（CSPで外部送信を遮断）。保存は端末内のみ・90日で自動削除されます。</span>
     <div class="btnrow" style="justify-content:flex-end">
       <button onclick="window.print()">結果を印刷</button>
       <button onclick="loadDemo()">デモデータ</button>
@@ -191,39 +191,20 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
   </div>
 </header>
 
-<div class="panes noprint">
-  <section class="pane curr" id="pane-curr">
+<div class="panes noprint" style="grid-template-columns:1fr">
+  <section class="pane curr" id="pane-scan">
     <div class="pane-head">
-      <p class="pane-title">今回処方</p>
-      <span class="pane-state" id="state-curr">未読取</span>
+      <p class="pane-title">処方せんを読む</p>
+      <span class="pane-state">同じ患者・医療機関・診療科の前回処方があれば自動で比較します</span>
     </div>
-    <div class="slots" id="slots-curr"></div>
-    <div class="summary-lines" id="sum-curr"></div>
+    <div class="slots" id="slots-scan"></div>
     <div class="btnrow">
-      <button class="primary" onclick="openCamera('curr')">カメラで読取</button>
-      <button onclick="pickImage('curr')">画像から読取</button>
-      <button class="ghost" onclick="openText('curr')">テキスト入力</button>
-      <button class="ghost" onclick="clearPane('curr')">クリア</button>
+      <button class="primary" onclick="openCamera('scan')">カメラで読取</button>
+      <button onclick="pickImage('scan')">画像から読取</button>
+      <button class="ghost" onclick="openText()">テキスト入力</button>
     </div>
-    <div class="drop" id="drop-curr">画像ファイルをここにドロップ／このカードを選んで Ctrl+V で貼り付け</div>
-    <div class="msg" id="msg-curr"></div>
-  </section>
-
-  <section class="pane prev" id="pane-prev">
-    <div class="pane-head">
-      <p class="pane-title">前回処方</p>
-      <span class="pane-state" id="state-prev">未読取</span>
-    </div>
-    <div class="slots" id="slots-prev"></div>
-    <div class="summary-lines" id="sum-prev"></div>
-    <div class="btnrow">
-      <button onclick="openCamera('prev')">カメラで読取</button>
-      <button onclick="pickImage('prev')">画像から読取</button>
-      <button class="ghost" onclick="openText('prev')">テキスト入力</button>
-      <button class="ghost" onclick="clearPane('prev')">クリア</button>
-    </div>
-    <div class="drop" id="drop-prev">今回処方を読み取ると、保存された前回処方がここに自動で入ります</div>
-    <div class="msg" id="msg-prev"></div>
+    <div class="drop" id="drop-scan">画像ファイルをここにドロップ／Ctrl+V で貼り付け</div>
+    <div class="msg" id="msg-scan"></div>
   </section>
 </div>
 
@@ -10410,7 +10391,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
 
 var DRUG_MASTER_INFO={
   "format": "quickcheck-drug-master/1",
-  "generatedAt": "2026-08-20T11:56:05.925Z",
+  "generatedAt": "2026-08-20T14:09:34.835Z",
   "source": {
     "csvName": "y_20260317.csv",
     "csvSha256": "c1345cdf0d692f1f336f6362607e26a17e53280d68ff4f7b4d6252a93032ecd3"
@@ -10753,6 +10734,23 @@ function diffPair(p,c){
   return ch;
 }
 
+/** 1枚の処方せん単体に対する警告（初回表示でも比較表示でも出す） */
+function singleRxAlerts(currRx){
+  const alerts=[];
+  const seen=new Map();
+  for(const d of currRx.drugs){
+    const k=keyCode(d)||keyName(d); if(!k) continue;
+    if(!seen.has(k)) seen.set(k,[]); seen.get(k).push(d);
+  }
+  const dups=[...seen.values()].filter(a=>a.length>1);
+  if(dups.length)
+    alerts.push({level:'warn', text:'処方内に同一薬品の重複があります：'+dups.map(a=>`${a[0].名称}（RP${a.map(d=>d.rp.no).join('・')}）`).join(' ／ ')});
+  if(currRx.リフィル) alerts.push({level:'info', text:`リフィル処方箋です（総使用回数 ${currRx.リフィル.総使用回数} 回）。`});
+  if(currRx.分割指示) alerts.push({level:'info', text:`分割指示に係る処方箋です（全 ${currRx.分割指示.回数} 回中 ${currRx.分割指示.回} 回目）。`});
+  if(currRx.残薬確認) alerts.push({level:'info', text:'残薬確認欄の指示があります：'+(CODE.残薬確認[currRx.残薬確認]||currRx.残薬確認)});
+  return alerts;
+}
+
 function compare(prevRx, currRx){
   const prev=prevRx.drugs.map(d=>Object.assign(d,{_m:null}));
   const curr=currRx.drugs.map(d=>Object.assign(d,{_m:null}));
@@ -10798,19 +10796,7 @@ function compare(prevRx, currRx){
   if(rows.some(r=>r.spec))
     alerts.push({level:'warn', text:'規格（含量）違いの可能性がある薬品があります。同一銘柄で含量が変わっていないか確認してください。'});
 
-  // 今回処方内の重複投与
-  const seen=new Map();
-  for(const d of currRx.drugs){
-    const k=keyCode(d)||keyName(d); if(!k) continue;
-    if(!seen.has(k)) seen.set(k,[]); seen.get(k).push(d);
-  }
-  const dups=[...seen.values()].filter(a=>a.length>1);
-  if(dups.length)
-    alerts.push({level:'warn', text:'今回処方内に同一薬品の重複があります：'+dups.map(a=>`${a[0].名称}（RP${a.map(d=>d.rp.no).join('・')}）`).join(' ／ ')});
-
-  if(currRx.リフィル) alerts.push({level:'info', text:`今回はリフィル処方箋です（総使用回数 ${currRx.リフィル.総使用回数} 回）。`});
-  if(currRx.分割指示) alerts.push({level:'info', text:`今回は分割指示に係る処方箋です（全 ${currRx.分割指示.回数} 回中 ${currRx.分割指示.回} 回目）。`});
-  if(currRx.残薬確認) alerts.push({level:'info', text:'今回処方に残薬確認欄の指示があります：'+(CODE.残薬確認[currRx.残薬確認]||currRx.残薬確認)});
+  alerts.push(...singleRxAlerts(currRx));
 
   const counts={add:0,del:0,chg:0,same:0};
   rows.forEach(r=>counts[r.kind]++);
@@ -10871,17 +10857,36 @@ function sha256hex(str){
   return H.map(x=>x.toString(16).padStart(8,'0')).join('');
 }
 
-/** 患者の照合鍵。氏名は保存せず、この鍵だけを持つ。
+/** 医療機関の識別子（種別＋都道府県＋機関コード）。種別省略は医科(1)に正規化 */
+function hospKey(rx){
+  const h=rx.hosp||{};
+  if(!h.コード) return '';
+  return (h.種別||'1')+':'+(h.都道府県||'')+':'+h.コード;
+}
+/** 診療科の識別子。コード優先・無ければ名称。レコード自体が無ければ空文字＝
+ *  「診療科なし」という1つのキー値として扱う（規約上、診療所・単科病院は
+ *  診療科レコードを省略してよいため。機関単位へ黙って合流はさせない） */
+function deptKey(rx){
+  const d=rx.dept||{};
+  if(d.コード) return 'C:'+d.コード;
+  if(d.名称) return 'N:'+norm(d.名称);
+  return '';
+}
+
+/** 照合鍵: 患者（氏名＋生年月日＋性別）× 医療機関 × 診療科。
+ *  氏名等は保存せず、この鍵だけを持つ。
  *  カナ・漢字のどちらか一方しか記録しない医療機関があるため、両方から鍵を作って
- *  どれか一致すれば同一人物とみなす。 */
-function patientKeys(rx, salt){
+ *  どれか一致すれば同一とみなす。
+ *  医療機関・診療科が違えば別の鍵になる＝別機関の処方せん同士は比較されない。 */
+function recordKeys(rx, salt){
   const p=rx.patient||{};
   const b=parseJDate(p.生年月日);
   const birth=b?b.key:'';
   const sex=p.性別||'';
   if(!birth) return [];                       // 生年月日がなければ照合しない（人違いを避ける）
+  const scope='|H:'+hospKey(rx)+'|D:'+deptKey(rx);
   const keys=[];
-  const mk=(tag,name)=>sha256hex(salt+'|'+tag+'|'+norm(name)+'|'+birth+'|'+sex);
+  const mk=(tag,name)=>sha256hex(salt+'|'+tag+'|'+norm(name)+'|'+birth+'|'+sex+scope);
   if(p.カナ) keys.push(mk('k',p.カナ));
   if(p.氏名) keys.push(mk('n',p.氏名));
   return keys;
@@ -10949,7 +10954,31 @@ const Store=(function(){
     if(mode==='idb' && navigator.storage && navigator.storage.persist){
       try{ await navigator.storage.persist(); }catch(e){}   // 自動削除されにくくする
     }
+    await housekeeping();
     return mode;
+  }
+
+  const SCHEMA=2;        // 2 = 患者×医療機関×診療科キー（2026-08-20〜）
+  const KEEP_DAYS=90;    // 端末に処方情報を残す期間
+  async function metaGet(k){
+    if(mode==='idb') return await idbReq(db.transaction('meta','readonly').objectStore('meta').get(k));
+    return mem['meta_'+k];
+  }
+  async function metaSet(k,v){
+    if(mode==='idb'){
+      const tx=db.transaction('meta','readwrite');
+      tx.objectStore('meta').put(v,k);
+      return new Promise(res=>{ tx.oncomplete=()=>res(); });
+    }
+    mem['meta_'+k]=v; flush();
+  }
+  /** 起動時の整理: 鍵の作り方が変わった旧データの破棄と、90日を過ぎた保存の自動削除 */
+  async function housekeeping(){
+    try{
+      if(await metaGet('schema')!==SCHEMA){ await clear(); await metaSet('schema',SCHEMA); }
+      const cutoff=Date.now()-KEEP_DAYS*86400000;
+      for(const r of await all()) if(!r.savedAt || r.savedAt<cutoff) await delRec(r.id);
+    }catch(e){}
   }
   function flush(){ if(mode==='local'){ try{ localStorage.setItem(LSKEY, JSON.stringify(mem)); }catch(e){} } }
 
@@ -11019,16 +11048,8 @@ const Store=(function(){
     mem.recs={}; flush();
   }
   return {init, getSalt, setSalt, findByKeys, putRec, delRec, all, clear,
-          get mode(){ return mode; }};
+          get mode(){ return mode; }, KEEP_DAYS};
 })();
-
-/** 今読んだ処方に対応する「前回処方」を保存から探す */
-async function lookupPrevious(rx){
-  const salt=await Store.getSalt();
-  const keys=patientKeys(rx, salt);
-  if(!keys.length) return {keys, rec:null};
-  return {keys, rec: await Store.findByKeys(keys)};
-}
 
 /** 今読んだ処方を保存する（交付日が新しい方を残す） */
 async function saveCurrent(rx, keys, existing){
@@ -11048,6 +11069,16 @@ async function saveCurrent(rx, keys, existing){
    4. 画面描画
    ============================================================ */
 const state = {prev:null, curr:null};
+/** 表示モード: null / {mode:'first', noSave?} / {mode:'compare', storedSide:'prev'|'curr', demo?} */
+let compareMeta = null;
+
+/** 比較キーの表示名（医療機関＋診療科） */
+function rxKeyText(rx){
+  const hosp=(rx.hosp&&rx.hosp.名称)||'医療機関名不明';
+  const d=rx.dept||{};
+  const dept=d.名称||(d.コード?('診療科コード'+d.コード):'');
+  return hosp+(dept?'　'+dept:'　（診療科記載なし）');
+}
 
 function paneSummary(rx){
   if(!rx) return '';
@@ -11066,16 +11097,6 @@ function paneSummary(rx){
   return rows.map(r=>`<div><span class="k">${r[0]}</span><span class="v">${esc(r[1])}</span></div>`).join('');
 }
 
-function renderPane(t){
-  const rx=state[t];
-  document.getElementById('sum-'+t).innerHTML = paneSummary(rx);
-  const st=document.getElementById('state-'+t);
-  if(!rx){ st.textContent='未読取'; st.innerHTML='未読取'; return; }
-  st.innerHTML = (t==='prev' && prevSource==='store')
-    ? '<span class="src">保存から自動取得</span>'
-    : '読取済み'+(rx.version?`（${rx.version}）`:'');
-}
-
 function rpBlock(rp){
   const supp=rpSuppText(rp);
   return `<div class="rp">
@@ -11089,19 +11110,40 @@ function rpBlock(rp){
 
 function renderResult(){
   const el=document.getElementById('result');
-  if(!state.prev || !state.curr){
-    el.innerHTML = `<div class="card noprint"><p class="sub">前回処方と今回処方の両方を読み取ると、ここに差分が表示されます。`
-      + (state.prev||state.curr ? `（現在 ${state.prev?'前回':'今回'} のみ読取済み）` : '') + `</p></div>`;
+  if(!state.curr){
+    el.innerHTML = `<div class="card noprint"><p class="sub">処方せんを読み取ると、ここに結果が表示されます。</p></div>`;
     return;
   }
+
+  /* ---- 初回（比較対象なし） ---- */
+  if(!state.prev){
+    const rx=state.curr, cm=compareMeta||{};
+    let h=`<div class="card"><h2>読取結果</h2>`;
+    h+=`<div class="alert info"><b>初回（比較対象なし）</b> — ${esc(rxKeyText(rx))} の前回処方は保存されていません。`
+      +(cm.noSave?'':'今回の内容を保存しました。次回の読取から自動で比較されます。')+`</div>`;
+    h+=singleRxAlerts(rx).map(a=>`<div class="alert ${a.level}">${esc(a.text)}</div>`).join('');
+    h+=`<div class="summary-lines" style="max-width:560px;margin-bottom:12px">${paneSummary(rx)}</div>`;
+    h+=`<div class="rx-cols"><div><h3>処方内容</h3>${rx.rps.map(rpBlock).join('')}${remarksBlock(rx)}</div></div></div>`;
+    h+=`<div class="card noprint"><h2>読取データ（検証用）</h2>
+      <details><summary>生データ（${rx.records.length} レコード）</summary><pre>${esc(rx.raw)}</pre></details></div>`;
+    el.innerHTML=h;
+    return;
+  }
+
+  /* ---- 比較 ---- */
+  const cm=compareMeta||{};
   const r=compare(state.prev, state.curr);
   const pd=parseJDate(state.prev.交付年月日), cd=parseJDate(state.curr.交付年月日);
 
   let h='';
   h+=`<div class="card">
     <h2>突合結果</h2>
+    <p class="sub"><b>比較対象: ${esc(rxKeyText(state.prev))}　${esc(pd?pd.text:'交付日不明')}交付分</b>`
+    +(cm.demo?'（デモ表示・保存していません）':cm.storedSide==='prev'?'（保存から自動取得）':'')+`</p>
     <p class="sub">前回 ${esc(pd?pd.text:(state.prev.交付年月日||'交付日不明'))}　→　今回 ${esc(cd?cd.text:(state.curr.交付年月日||'交付日不明'))}
        ／ 患者 ${esc((state.curr.patient&&(state.curr.patient.氏名||state.curr.patient.カナ))||'—')}</p>`;
+  if(cm.storedSide==='curr')
+    h+=`<div class="alert info">いま読み取った処方せんは保存分より古いため、「前回」側として表示しています。「今回」側は保存されていた最新の処方です（保存は変更していません）。</div>`;
   h+=r.alerts.map(a=>`<div class="alert ${a.level}">${esc(a.text)}</div>`).join('');
   h+=`<div class="counts">
     <div class="count del"><div class="n">${r.counts.del}</div><div class="l">中止（前回のみ）</div></div>
@@ -11159,7 +11201,7 @@ function remarksBlock(rx){
    5. 読取（分割QR / Shift-JIS）
    ============================================================ */
 const sjis = new TextDecoder('shift_jis', {fatal:false});
-const sessions = {prev:newSession(), curr:newSession()};
+const sessions = {scan:newSession()};
 function newSession(){ return {parts:new Map(), total:null, parity:null, lastIdx:null}; }
 
 function renderSlots(t){
@@ -11218,42 +11260,57 @@ function feedSymbol(code, t){
 function finalize(t, bytes, parityBad){
   const text=sjis.decode(new Uint8Array(bytes));
   const rx=parseJahis(text);
-  state[t]=rx;
-  if(t==='curr') prevSource=null;      // 今回を読み直したら前回の出所も引き直す
-  renderPane(t); renderResult();
-  if(rx.errors.length) msg(t, rx.errors.join(' '), 'err');
-  else if(parityBad) msg(t, '読み取りました。ただし分割QRのパリティが一致しません。データが混在していないか生データを確認してください。', 'warn');
-  else msg(t, `読み取りました（${rx.rps.length}剤 / ${rx.drugs.length}薬品）。`, 'ok');
-  beep(rx.errors.length?'err':'ok');
-  if(t==='curr' && !rx.errors.length) afterScanCurrent(rx);
-}
-
-/* 今回処方を読んだあと：保存から前回処方を探して自動で比較し、今回を保存する */
-let prevSource=null;                   // 'store' = 保存から自動取得、null = 手動読取
-async function afterScanCurrent(rx){
-  let found=null, keys=[];
-  try{
-    const r=await lookupPrevious(rx);
-    keys=r.keys; found=r.rec;
-  }catch(e){
-    msg('curr','保存領域を読めませんでした（'+(e.name||e)+'）。比較は手動で前回処方を読み取ってください。','warn');
+  sessions.scan=newSession(); renderSlots('scan');   // 次の処方せんの読取に備えてリセット
+  if(rx.errors.length){
+    state.prev=null; state.curr=rx; compareMeta={mode:'first', noSave:true};
+    renderResult();
+    msg('scan', rx.errors.join(' '), 'err');
+    beep('err');
     return;
   }
-  if(found){
-    state.prev=parseJahis(found.text);
-    prevSource='store';
-    sessions.prev=newSession(); renderSlots('prev');
-    renderPane('prev'); renderResult();
-    const d=parseJDate(state.prev.交付年月日);
-    msg('prev', `保存されていた前回処方を読み込みました（交付日 ${d?d.text:'不明'}）。`, 'ok');
-  }else if(keys.length){
-    msg('prev','この患者の保存された処方はありません。前回処方せんがあれば読み取ると比較できます。','warn');
-  }
+  if(parityBad) msg('scan','読み取りました。ただし分割QRのパリティが一致しません。データが混在していないか生データを確認してください。','warn');
+  beep('ok');
+  processScanned(rx);
+}
+
+/* 読み取った処方せんの処理:
+   同一キー（患者×医療機関×診療科）の保存分を探し、
+   無ければ「初回」として保存、有れば交付日で新旧を判定して比較する。 */
+async function processScanned(rx){
+  let keys=[], found=null, storeOK=true;
   try{
-    const res=await saveCurrent(rx, keys, found);
-    if(!res.saved && res.reason) msg('curr', res.reason, 'warn');
-  }catch(e){
-    msg('curr','保存できませんでした（'+(e.name||e)+'）。','err');
+    const salt=await Store.getSalt();
+    keys=recordKeys(rx, salt);
+    if(keys.length) found=await Store.findByKeys(keys);
+  }catch(e){ storeOK=false; }
+
+  const scannedDate=(parseJDate(rx.交付年月日)||{}).key||'';
+
+  if(!found){
+    state.prev=null; state.curr=rx;
+    compareMeta={mode:'first', noSave:(!keys.length || !storeOK)};
+    renderResult();
+    if(!storeOK) msg('scan','保存領域を読めないため、保存と自動比較ができません（内容表示のみ）。','err');
+    else if(!keys.length) msg('scan','患者氏名または生年月日が記録されていないため、保存・比較はできません（内容表示のみ）。','warn');
+    else{
+      try{ await saveCurrent(rx, keys, null); msg('scan','初回として保存しました。次回の読取から自動で比較されます。','ok'); }
+      catch(e){ msg('scan','保存できませんでした（'+(e.name||e)+'）。','err'); }
+    }
+  }else{
+    const stored=parseJahis(found.text);
+    // 交付日で新旧を判定。同日はいま読んだ方を「今回」とする（読取時刻が新しいため）
+    const scannedIsNew = !found.date || !scannedDate || scannedDate>=found.date;
+    if(scannedIsNew){ state.prev=stored; state.curr=rx; compareMeta={mode:'compare', storedSide:'prev'}; }
+    else            { state.prev=rx; state.curr=stored; compareMeta={mode:'compare', storedSide:'curr'}; }
+    renderResult();
+    try{
+      await saveCurrent(rx, keys, found);   // 交付日が新しい方だけが保存に残る
+      msg('scan', scannedIsNew
+        ? '前回処方と比較しました。今回分を保存しました。'
+        : '読み取った処方せんは保存分より古いため、「前回」側として比較しました（保存は最新のまま）。', 'ok');
+    }catch(e){
+      msg('scan','比較は表示しましたが、保存を更新できませんでした（'+(e.name||e)+'）。','err');
+    }
   }
   renderStoreInfo();
 }
@@ -11269,13 +11326,13 @@ async function renderStoreInfo(){
     if(typeof DRUG_MASTER_INFO!=='undefined' && DRUG_MASTER_INFO && DRUG_MASTER_INFO.source)
       mi='　／　コード表: '+DRUG_MASTER_INFO.source.csvName.replace(/^y_|\.csv$/g,'')+'版（'+DRUG_MASTER_INFO.receiptCount+'件）';
   }catch(e){}
-  el.innerHTML=`保存済み <b>${n}</b> 件　／　保存先：${esc(label)}${esc(mi)}`
+  el.innerHTML=`保存済み <b>${n}</b> 件（患者×医療機関×診療科ごとに直近1回・${Store.KEEP_DAYS}日で自動削除）　／　保存先：${esc(label)}${esc(mi)}`
     + (Store.mode==='memory' ? '　<span class="src">この開き方では保存が使えません</span>' : '');
 }
 async function clearStore(){
   if(!confirm('保存されている前回処方をすべて消去します。よろしいですか？')) return;
   await Store.clear(); renderStoreInfo();
-  msg('curr','保存を全消去しました。','ok');
+  msg('scan','保存を全消去しました。','ok');
 }
 /* 書き出し・読み込みはコピー＆貼り付けを基本にする。
    埋め込み表示（アーティファクト）ではページ発のファイルダウンロードが
@@ -11321,7 +11378,7 @@ async function bakImport(){
     await Store.setSalt(data.salt);
     renderStoreInfo();
     document.getElementById('bakDlg').close();
-    msg('curr',`保存データを読み込みました（${data.records.length} 件）。`,'ok');
+    msg('scan',`保存データを読み込みました（${data.records.length} 件）。`,'ok');
   }catch(err){
     m.textContent='取り込めませんでした：'+(err.message||err);
   }
@@ -11387,7 +11444,7 @@ function beep(kind){
 const cam={target:null, stream:null, raf:0, track:null, torch:false};
 async function openCamera(t){
   cam.target=t; clearMsg(t);
-  document.getElementById('camTitle').textContent=(t==='prev'?'前回処方':'今回処方')+' — カメラで読取';
+  document.getElementById('camTitle').textContent='処方せんを読む — カメラで読取';
   document.getElementById('camDlg').showModal();
   renderSlots(t);
   const st=document.getElementById('scanState');
@@ -11466,10 +11523,9 @@ document.getElementById('camDlg').addEventListener('close', ()=>{
 });
 
 /* ---------- 画像から読取（ファイル選択 / ドロップ / 貼り付け） ---------- */
-let pickTarget='prev';
-function pickImage(t){ pickTarget=t; document.getElementById('filepick').click(); }
+function pickImage(){ document.getElementById('filepick').click(); }
 document.getElementById('filepick').addEventListener('change', e=>{
-  const f=e.target.files[0]; if(f) readImage(f, pickTarget); e.target.value='';
+  const f=e.target.files[0]; if(f) readImage(f, 'scan'); e.target.value='';
 });
 function readImage(file, t){
   clearMsg(t);
@@ -11505,51 +11561,47 @@ function readImage(file, t){
   };
   im.src=url;
 }
-for(const t of ['prev','curr']){
-  const z=document.getElementById('drop-'+t), pane=document.getElementById('pane-'+t);
+{
+  const z=document.getElementById('drop-scan'), pane=document.getElementById('pane-scan');
   ['dragenter','dragover'].forEach(ev=>pane.addEventListener(ev,e=>{e.preventDefault();z.classList.add('over');}));
   ['dragleave','drop'].forEach(ev=>pane.addEventListener(ev,e=>{e.preventDefault();z.classList.remove('over');}));
   pane.addEventListener('drop',e=>{
     const f=[...(e.dataTransfer.files||[])].find(x=>x.type.startsWith('image/'));
-    if(f) readImage(f,t); else msg(t,'画像ファイルをドロップしてください。','err');
+    if(f) readImage(f,'scan'); else msg('scan','画像ファイルをドロップしてください。','err');
   });
-  pane.addEventListener('click',()=>{ pasteTarget=t; });
 }
-let pasteTarget='curr';
 window.addEventListener('paste', e=>{
   const it=[...(e.clipboardData?e.clipboardData.items:[])].find(x=>x.type.startsWith('image/'));
-  if(it){ e.preventDefault(); readImage(it.getAsFile(), pasteTarget); }
+  if(it){ e.preventDefault(); readImage(it.getAsFile(), 'scan'); }
 });
 
 /* ---------- テキスト入力 ---------- */
-let txtTarget='prev';
-function openText(t){
-  txtTarget=t;
-  document.getElementById('txtTitle').textContent=(t==='prev'?'前回処方':'今回処方')+' — テキスト入力';
-  document.getElementById('txtArea').value = state[t] ? state[t].raw : '';
+function openText(){
+  document.getElementById('txtTitle').textContent='処方せんを読む — テキスト入力';
+  document.getElementById('txtArea').value = state.curr ? state.curr.raw : '';
   document.getElementById('txtMsg').textContent='';
   document.getElementById('txtDlg').showModal();
 }
 function applyText(){
   const v=document.getElementById('txtArea').value;
   if(!v.trim()){ document.getElementById('txtMsg').textContent='テキストが空です。'; return; }
-  sessions[txtTarget]=newSession(); renderSlots(txtTarget);
   const rx=parseJahis(v);
-  if(txtTarget==='curr') prevSource=null;
-  state[txtTarget]=rx; renderPane(txtTarget); renderResult();
-  if(rx.errors.length) msg(txtTarget, rx.errors.join(' '), 'err');
-  else msg(txtTarget, `読み込みました（${rx.rps.length}剤 / ${rx.drugs.length}薬品）。`, 'ok');
   document.getElementById('txtDlg').close();
-  if(txtTarget==='curr' && !rx.errors.length) afterScanCurrent(rx);
+  if(rx.errors.length){
+    state.prev=null; state.curr=rx; compareMeta={mode:'first', noSave:true};
+    renderResult();
+    msg('scan', rx.errors.join(' '), 'err');
+    return;
+  }
+  processScanned(rx);
 }
 
 /* ---------- 操作 ---------- */
-function clearPane(t){
-  state[t]=null; sessions[t]=newSession();
-  if(t==='prev') prevSource=null;
-  renderSlots(t); renderPane(t); renderResult(); clearMsg(t);
+function clearAll(){
+  state.prev=null; state.curr=null; compareMeta=null;
+  sessions.scan=newSession();
+  renderSlots('scan'); clearMsg('scan'); renderResult();
 }
-function clearAll(){ prevSource=null; clearPane('prev'); clearPane('curr'); }
 
 /* ---------- デモ ---------- */
 const DEMO_PREV=[
@@ -11580,8 +11632,9 @@ const DEMO_CURR=[
 function loadDemo(){
   clearAll();
   state.prev=parseJahis(DEMO_PREV); state.curr=parseJahis(DEMO_CURR);
-  renderPane('prev'); renderPane('curr'); renderResult();
-  msg('prev','デモデータを読み込みました。','ok'); msg('curr','デモデータを読み込みました。','ok');
+  compareMeta={mode:'compare', storedSide:'prev', demo:true};
+  renderResult();
+  msg('scan','デモデータを表示しています（保存はしていません）。','ok');
 }
 
 renderResult();
