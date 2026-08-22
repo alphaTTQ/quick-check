@@ -232,6 +232,7 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
     <div class="scanbar">
       <span id="scanState">カメラを起動しています…</span>
       <span>
+        <button onclick="Sound.unlock();beep('part')">音の確認</button>
         <button onclick="closeCamera()">閉じる</button>
       </span>
     </div>
@@ -11737,26 +11738,117 @@ document.getElementById('jsonpick').addEventListener('change', async e=>{
   document.getElementById('bakMsg').textContent='ファイルを読み込みました。［取り込む］で反映します。';
 });
 
-/* 読取音。iOS Safari は AudioContext をタップ操作の中で起動しないと無音になるため、
-   共有の Context を1つ持ち、画面のタップごとに resume して備える。 */
-let audioCtx=null;
-function ensureAudio(){
-  try{
-    const C=window.AudioContext||window.webkitAudioContext; if(!C) return null;
-    if(!audioCtx) audioCtx=new C();
-    if(audioCtx.state==='suspended') audioCtx.resume().catch(()=>{});
-    return audioCtx;
-  }catch(e){ return null; }
-}
-document.addEventListener('pointerdown', ensureAudio, true);
-function tone(ctx,f,start,dur){
-  const o=ctx.createOscillator(), g=ctx.createGain();
-  o.frequency.value=f;
-  g.gain.setValueAtTime(0.08, start);
-  g.gain.exponentialRampToValueAtTime(0.001, start+dur);
-  o.connect(g); g.connect(ctx.destination);
-  o.start(start); o.stop(start+dur);
-}
+/* ============================================================
+   読取音
+   ------------------------------------------------------------
+   iOS Safari では WebAudio(AudioContext) がカメラ使用中に無音になることがある
+   （音量・マナーモードに関係なく鳴らない）。そのため
+   「WAVを生成して <audio> で鳴らす」方式を主、WebAudio を予備とする。
+   iOS の自動再生制限は<audio>要素ごとに掛かるので、要素は1つだけ使い回し、
+   最初のタップで無音WAVを再生して解除しておく。
+   ============================================================ */
+const Sound=(function(){
+  const RATE=22050;
+  // 種別ごとの音（[周波数Hz, 長さ秒]。周波数0は無音＝間）
+  const SPEC={
+    part:[[660,0.13]],                        // QRを1つ読んだ
+    ok:  [[880,0.13],[0,0.04],[1320,0.20]],   // 全部読み終わった
+    dup: [[330,0.13]],                        // 読取済み
+    err: [[220,0.38]],                        // エラー
+  };
+  let el=null, urls=null, unlocked=false, ctx=null;
+
+  function encodeWav(sm){
+    const n=sm.length, buf=new ArrayBuffer(44+n*2), v=new DataView(buf);
+    const w=(o,s)=>{ for(let i=0;i<s.length;i++) v.setUint8(o+i,s.charCodeAt(i)); };
+    w(0,'RIFF'); v.setUint32(4,36+n*2,true); w(8,'WAVE'); w(12,'fmt ');
+    v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+    v.setUint32(24,RATE,true); v.setUint32(28,RATE*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true);
+    w(36,'data'); v.setUint32(40,n*2,true);
+    for(let i=0;i<n;i++) v.setInt16(44+i*2, Math.max(-1,Math.min(1,sm[i]))*32767, true);
+    const b=new Uint8Array(buf); let s='';
+    for(let i=0;i<b.length;i+=4096) s+=String.fromCharCode.apply(null, b.subarray(i,i+4096));
+    return 'data:audio/wav;base64,'+btoa(s);
+  }
+  function render(segs){
+    let total=0; for(const g of segs) total+=Math.round(g[1]*RATE);
+    const out=new Float32Array(total);
+    let p=0;
+    for(const [f,dur] of segs){
+      const n=Math.round(dur*RATE);
+      for(let i=0;i<n;i++){
+        // 立ち上がり5ms・立ち下がり25msで包絡（プツッというクリック音を防ぐ）
+        const env=Math.min(1, i/(0.005*RATE), (n-i)/(0.025*RATE));
+        out[p+i]= f ? Math.sin(2*Math.PI*f*(i/RATE))*0.7*env : 0;
+      }
+      p+=n;
+    }
+    return out;
+  }
+  function build(){
+    if(urls) return;
+    urls={};
+    try{
+      for(const k in SPEC) urls[k]=encodeWav(render(SPEC[k]));
+      urls._silent=encodeWav(new Float32Array(Math.round(0.05*RATE)));
+      el=new Audio(); el.preload='auto';
+    }catch(e){ urls=null; }
+  }
+  /** 最初のタップで呼ぶ。iOSの再生制限を解除する */
+  function unlock(){
+    build();
+    if(!unlocked && el){
+      unlocked=true;
+      try{
+        el.src=urls._silent;
+        const p=el.play();
+        if(p&&p.catch) p.catch(()=>{});
+      }catch(e){}
+    }
+    try{   // 予備のWebAudioも同じタップの中で起こしておく
+      const C=window.AudioContext||window.webkitAudioContext;
+      if(C){
+        if(!ctx) ctx=new C();
+        if(ctx.state!=='running') ctx.resume().catch(()=>{});
+        const b=ctx.createBuffer(1,1,ctx.sampleRate), s=ctx.createBufferSource();
+        s.buffer=b; s.connect(ctx.destination); s.start(0);
+      }
+    }catch(e){}
+  }
+  function webAudioFallback(kind){
+    if(!ctx) return;
+    const go=()=>{
+      let t=ctx.currentTime+0.02;
+      for(const [f,dur] of SPEC[kind]||SPEC.part){
+        if(f){
+          const o=ctx.createOscillator(), g=ctx.createGain();
+          o.frequency.value=f;
+          g.gain.setValueAtTime(0.0001,t);
+          g.gain.exponentialRampToValueAtTime(0.35, t+0.005);
+          g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+          o.connect(g); g.connect(ctx.destination);
+          o.start(t); o.stop(t+dur);
+        }
+        t+=dur;
+      }
+    };
+    try{ ctx.state==='running' ? go() : ctx.resume().then(go).catch(()=>{}); }catch(e){}
+  }
+  function play(kind){
+    build();
+    if(!el || !urls || !urls[kind]){ webAudioFallback(kind); return; }
+    try{
+      el.src=urls[kind];
+      el.currentTime=0;
+      const p=el.play();
+      if(p&&p.catch) p.catch(()=>webAudioFallback(kind));
+    }catch(e){ webAudioFallback(kind); }
+  }
+  return {unlock, play, _spec:SPEC};
+})();
+// タップ・クリックのたびに解除を試みる（iOSはユーザー操作の中でしか解除できない）
+['pointerdown','touchend','click'].forEach(ev=>
+  document.addEventListener(ev, ()=>Sound.unlock(), true));
 /** 画面フラッシュ。カメラダイアログが開いている間はその中に出す
  *  （<dialog> は最前面レイヤーに描画されるため、外に置くと隠れる）。 */
 function flash(kind){
@@ -11782,17 +11874,13 @@ function beep(kind){
     if(navigator.vibrate)
       navigator.vibrate(kind==='part'?40 : kind==='ok'?[40,60,120] : kind==='dup'?20 : 250);
   }catch(e){}
-  const ctx=ensureAudio(); if(!ctx) return;
-  const t=ctx.currentTime+0.01;
-  if(kind==='part')      tone(ctx, 660, t, .10);
-  else if(kind==='ok'){  tone(ctx, 880, t, .10); tone(ctx, 1320, t+.12, .16); }
-  else if(kind==='dup')  tone(ctx, 330, t, .10);
-  else                   tone(ctx, 220, t, .30);
+  Sound.play(kind);
 }
 
 /* ---------- カメラ ---------- */
 const cam={target:null, stream:null, raf:0, track:null, done:false};
 async function openCamera(t){
+  Sound.unlock();            // カメラを開くタップの中で音の再生制限を解除する
   cam.target=t; cam.done=false; clearMsg(t);
   document.getElementById('camTitle').textContent='処方せんを読む — カメラで読取';
   document.getElementById('camDlg').showModal();
@@ -11872,7 +11960,7 @@ document.getElementById('camDlg').addEventListener('close', ()=>{
 });
 
 /* ---------- 画像から読取（ファイル選択 / ドロップ / 貼り付け） ---------- */
-function pickImage(){ document.getElementById('filepick').click(); }
+function pickImage(){ Sound.unlock(); document.getElementById('filepick').click(); }
 document.getElementById('filepick').addEventListener('change', e=>{
   const f=e.target.files[0]; if(f) readImage(f, 'scan'); e.target.value='';
 });
