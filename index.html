@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: blob: mediastream:; connect-src 'none'; form-action 'none'; base-uri 'none'">
-<title>処方せん監査 — 前回・今回 処方比較</title>
+<title>Quick-check</title>
 <style>
 :root{
   --bg:#f4f6f8; --panel:#ffffff; --ink:#1a2027; --sub:#5b6670; --line:#d8dee4;
@@ -178,11 +178,10 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
 
 <header>
   <div>
-    <h1>処方せん監査 — 前回・今回 処方比較</h1>
-    <p class="sub">院外処方せん2次元シンボル（JAHIS Ver.1.10 / QRコード Model2・Shift-JIS）を読み取って差分を突合します。</p>
+    <h1>Quick-check</h1>
   </div>
   <div class="noprint" style="text-align:right">
-    <span class="privacy">通信しない設計です（CSPで外部送信を遮断）。保存は端末内のみ・90日で自動削除されます。</span>
+    <span class="privacy">90日で自動削除されます。</span>
     <div class="btnrow" style="justify-content:flex-end">
       <button onclick="window.print()">結果を印刷</button>
       <button onclick="loadDemo()">デモデータ</button>
@@ -233,7 +232,6 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
     <div class="scanbar">
       <span id="scanState">カメラを起動しています…</span>
       <span>
-        <button id="torchBtn" class="hidden" onclick="toggleTorch()">ライト</button>
         <button onclick="closeCamera()">閉じる</button>
       </span>
     </div>
@@ -11793,7 +11791,7 @@ function beep(kind){
 }
 
 /* ---------- カメラ ---------- */
-const cam={target:null, stream:null, raf:0, track:null, torch:false, done:false};
+const cam={target:null, stream:null, raf:0, track:null, done:false};
 async function openCamera(t){
   cam.target=t; cam.done=false; clearMsg(t);
   document.getElementById('camTitle').textContent='処方せんを読む — カメラで読取';
@@ -11824,17 +11822,8 @@ async function openCamera(t){
   const v=document.getElementById('video');
   v.srcObject=cam.stream; await v.play().catch(()=>{});
   cam.track=cam.stream.getVideoTracks()[0];
-  try{
-    if(cam.track.getCapabilities && cam.track.getCapabilities().torch)
-      document.getElementById('torchBtn').classList.remove('hidden');
-  }catch(e){}
   st.textContent='QRコードを枠に合わせてください';
   tick();
-}
-function toggleTorch(){
-  if(!cam.track) return;
-  cam.torch=!cam.torch;
-  cam.track.applyConstraints({advanced:[{torch:cam.torch}]}).catch(()=>{});
 }
 function tick(){
   const v=document.getElementById('video');
@@ -11865,14 +11854,20 @@ function handleScan(code){
 function closeCamera(){
   if(cam.raf) cancelAnimationFrame(cam.raf); cam.raf=0;
   if(cam.stream){ cam.stream.getTracks().forEach(x=>x.stop()); cam.stream=null; }
-  cam.track=null; cam.torch=false;
-  document.getElementById('torchBtn').classList.add('hidden');
+  cam.track=null;
   document.getElementById('camDlg').close();
   cam.target=null;
 }
 document.getElementById('camDlg').addEventListener('close', ()=>{
   if(cam.raf) cancelAnimationFrame(cam.raf); cam.raf=0;
   if(cam.stream){ cam.stream.getTracks().forEach(x=>x.stop()); cam.stream=null; }
+  // 読み取り途中で閉じた場合は、集めた分割QRを破棄する。
+  // 残しておくと、次に別の処方せんを読んだときに前の断片と混ざるため。
+  if(!cam.done && sessions.scan.parts.size>0){
+    sessions.scan=newSession();
+    renderSlots('scan');
+    msg('scan','読み取りを中止しました。分割QRの読取状況はリセットされました。','warn');
+  }
   cam.target=null;
 });
 
