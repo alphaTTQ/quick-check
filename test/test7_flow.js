@@ -80,9 +80,11 @@ const dB='201,1,1,1,2,612170710,ノルバスク錠５ｍｇ,1,1,錠';
   ok(result().includes('保存分より古いため'), '3. 逆転の説明を表示');
   ok((await Store.all())[0].date==='20260313', '3. 保存は最新のまま上書きされない');
 
-  // 4) 同日 → 読んだ方が今回
-  await processScanned(parseJahis(RX(A,NAIKA,'20260313',dB)));
-  ok(api.getMeta().storedSide==='prev', '4. 同日交付は読んだ方を「今回」とする');
+  // 4) 同日・内容違い（訂正処方せん）→ 読んだ方が今回
+  //    ※ 同日・内容も同一の場合は「すでに登録済み」となり取り込まない（test12_rescan）
+  const dC='201,1,1,1,2,612170711,ノルバスク錠１０ｍｇ,1,1,錠';
+  await processScanned(parseJahis(RX(A,NAIKA,'20260313',dC)));
+  ok(api.getMeta().storedSide==='prev', '4. 同日交付（内容違い）は読んだ方を「今回」とする');
 
   // 5) 同一患者・同一機関でも診療科が違えば初回
   await processScanned(parseJahis(RX(A,SEIKEI,'20260313',dA)));
