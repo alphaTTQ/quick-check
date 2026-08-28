@@ -139,6 +139,7 @@ dialog::backdrop{background:rgba(10,16,22,.62)}
 #scanState{font-size:13.5px;font-weight:600}
 textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospace;font-size:12px;padding:9px;border:1px solid var(--line);border-radius:7px;resize:vertical}
 .hidden{display:none!important}
+#verbadge{position:fixed;right:8px;bottom:6px;font-size:11px;color:var(--sub);opacity:.75;z-index:3;pointer-events:none}
 /* 読取フィードバックの画面フラッシュ（マナーモードでも視認できる） */
 .flash{position:fixed;inset:0;pointer-events:none;z-index:2147483647;opacity:0}
 .flash.part{background:#1c5fa8}
@@ -197,6 +198,8 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
     <button class="ghost" style="font-size:12px;padding:2px 8px;min-height:0" onclick="loadDemo()">テストモード</button>
   </div>
 </header>
+
+<div id="verbadge" class="noprint">Ver 1.0</div>
 
 <!-- ============ 画面1: 読み取り画面 ============ -->
 <section id="view-scan">
