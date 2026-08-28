@@ -87,8 +87,8 @@ ok(!html.includes('>デモデータ<'), '5-3. デモデータボタンは無い'
   const header=html.slice(html.indexOf('<header>'), html.indexOf('</header>'));
   ok(!header.includes('結果を印刷') && !header.includes('画面をクリア'), '5-4. ヘッダーから印刷・クリアを撤去');
   const vr=html.slice(html.indexOf('id="view-result"'), html.indexOf('<input type="file"'));
-  ok(vr.includes('次の処方せんを読む') && vr.includes('読み取り画面へ') && vr.includes('結果を印刷'),
-     '5-5. 結果画面に［次の処方せんを読む］［読み取り画面へ］［結果を印刷］');
+  ok(vr.includes('次の処方せんを読む') && vr.includes('読み取り画面へ') && vr.includes('>印刷<'),
+     '5-5. 結果画面に［次の処方せんを読む］［読み取り画面へ］［印刷］');
   const scanView=html.slice(html.indexOf('id="view-scan"'), html.indexOf('id="view-result"'));
   ok(!scanView.includes('id="result"'), '5-6. 読み取り画面に結果表示が無い');
 }

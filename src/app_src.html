@@ -89,6 +89,16 @@ button.ghost:hover:not(:disabled){background:#e9edf1}
 .count.same{background:var(--same-bg);border-color:var(--same-line);color:var(--same)}
 .count[data-kind]{cursor:pointer;user-select:none;-webkit-tap-highlight-color:rgba(0,0,0,.08)}
 .count[data-kind]:active{transform:scale(.96)}
+/* 結果画面の上部固定バー: 3ボタンを常に1行に収める */
+#resultbar{
+  position:sticky;top:0;z-index:5;background:var(--bg);
+  padding:8px 0;margin-bottom:4px;flex-wrap:nowrap
+}
+#resultbar button{white-space:nowrap;min-width:0;flex:0 1 auto}
+@media (pointer:coarse){
+  #resultbar button{padding:11px 10px;font-size:14px;min-height:44px}
+  #resultbar button.primary{flex-shrink:0}
+}
 table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{border:1px solid var(--line);padding:7px 9px;vertical-align:top;text-align:left}
 th{background:#eef1f4;font-size:12px;color:var(--sub);font-weight:600;white-space:nowrap}
@@ -223,10 +233,10 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
 
 <!-- ============ 画面2: 結果画面（読取が成立すると自動で切り替わる） ============ -->
 <section id="view-result" class="hidden">
-  <div class="btnrow noprint" style="position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 0;margin-bottom:6px">
+  <div class="btnrow noprint" id="resultbar">
     <button class="primary" onclick="scanNext()">次の処方せんを読む</button>
     <button onclick="goScan()">読み取り画面へ</button>
-    <button onclick="window.print()">結果を印刷</button>
+    <button onclick="window.print()">印刷</button>
   </div>
   <div class="msg" id="msg-result"></div>
   <div id="result"></div>
@@ -1231,19 +1241,10 @@ function renderResult(){
   const pd=parseJDate(state.prev.交付年月日), cd=parseJDate(state.curr.交付年月日);
 
   let h='';
+  // スクロールなしで件数が見えるよう、見出しは1行に圧縮し、件数を最上部に置く
   h+=`<div class="card">
-    <h2>突合結果</h2>
-    <p class="sub"><b>比較対象: ${esc(rxKeyText(state.prev))}　${esc(pd?pd.text:'交付日不明')}交付分</b>`
-    +(cm.demo?'（デモ表示・保存していません）':cm.storedSide==='prev'?'（保存から自動取得）':'')+`</p>
-    <p class="sub">前回 ${esc(pd?pd.text:(state.prev.交付年月日||'交付日不明'))}　→　今回 ${esc(cd?cd.text:(state.curr.交付年月日||'交付日不明'))}
-       ／ 患者 ${esc((state.curr.patient&&(state.curr.patient.氏名||state.curr.patient.カナ))||'—')}</p>`;
-  if(cm.dateUnknown)
-    h+=`<div class="alert warn">交付日が読み取れないため、どちらが新しい処方か判定できません（保存分は維持しています）。表示上の前回・今回は仮の配置です。</div>`;
-  else if(cm.storedSide==='curr')
-    h+=`<div class="alert info">いま読み取った処方せんは保存分より古いため、「前回」側として表示しています。「今回」側は保存されていた最新の処方です（保存は変更していません）。</div>`;
-  if(state.prev.補足除外||state.curr.補足除外)
-    h+=`<div class="alert info">一包化・粉砕などの指示・備考は保存対象外のため比較していません。いま読み取った処方せんの指示は下の「処方内容」欄で確認できます。</div>`;
-  h+=r.alerts.map(a=>`<div class="alert ${a.level}">${esc(a.text)}</div>`).join('');
+    <p class="sub" style="margin-bottom:8px"><b>${esc(rxKeyText(state.prev))}</b>　患者 ${esc((state.curr.patient&&(state.curr.patient.氏名||state.curr.patient.カナ))||'—')}<br>
+    前回 ${esc(pd?pd.text:(state.prev.交付年月日||'交付日不明'))}${cm.demo?'（デモ）':cm.storedSide==='prev'?'（保存から自動取得）':''}　→　今回 ${esc(cd?cd.text:(state.curr.交付年月日||'交付日不明'))}</p>`;
   h+=`<div class="counts">
     <div class="count del" data-kind="del" role="button" tabindex="0"><div class="n">${r.counts.del}</div><div class="l">中止（前回のみ）</div></div>
     <div class="count add" data-kind="add" role="button" tabindex="0"><div class="n">${r.counts.add}</div><div class="l">新規（今回のみ）</div></div>
@@ -1251,6 +1252,13 @@ function renderResult(){
     <div class="count same" data-kind="same" role="button" tabindex="0"><div class="n">${r.counts.same}</div><div class="l">継続（変更なし）</div></div>
   </div>
   <p class="sub noprint" style="margin:-6px 0 12px">件数をタップすると薬品の一覧を表示します</p>`;
+  if(cm.dateUnknown)
+    h+=`<div class="alert warn">交付日が読み取れないため、どちらが新しい処方か判定できません（保存分は維持しています）。表示上の前回・今回は仮の配置です。</div>`;
+  else if(cm.storedSide==='curr')
+    h+=`<div class="alert info">いま読み取った処方せんは保存分より古いため、「前回」側として表示しています。「今回」側は保存されていた最新の処方です（保存は変更していません）。</div>`;
+  if(state.prev.補足除外||state.curr.補足除外)
+    h+=`<div class="alert info">一包化・粉砕などの指示・備考は保存対象外のため比較していません。いま読み取った処方せんの指示は下の「処方内容」欄で確認できます。</div>`;
+  h+=r.alerts.map(a=>`<div class="alert ${a.level}">${esc(a.text)}</div>`).join('');
 
   h+=`<table><thead><tr>
     <th style="width:5.5em">区分</th><th>薬品</th><th style="width:24%">前回</th><th style="width:24%">今回</th><th style="width:27%">相違点</th>

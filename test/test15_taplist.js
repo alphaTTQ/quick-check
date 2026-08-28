@@ -90,5 +90,15 @@ const CURR=RX('20260313',[
   api.showKindList('del');
   ok(body().includes('該当する薬品はありません'), '14. 0件の区分は「該当なし」を表示');
 
+  // 件数タイルが警告より上（スクロールせず見える位置）にあること
+  await api.processScanned(api.parseJahis(['JAHIS10','1,1,1234567,13,Ａ病院','4,2,01,内科',...P,'51,20260513','62,2',
+    '101,1,1,,28','111,1,1,,１日１回朝食後,1',
+    '201,1,1,1,2,620009999,ネキシウムカプセル２０ｍｇ,1,1,カプセル',
+    '201,1,2,1,2,620004321,メトホルミン塩酸塩錠２５０ｍｇ,3,1,錠',
+    '201,1,3,1,2,612170709,ノルバスク錠２．５ｍｇ,1,1,錠'].join('\r\n')));
+  const out=doc.getElementById('result').innerHTML;
+  ok(out.includes('class="counts"') && out.includes('alert'), '15. 件数と警告の両方がある比較を生成');
+  ok(out.indexOf('class="counts"') < out.indexOf('class="alert'), '16. 件数タイルが警告類より上に表示される');
+
   process.exit(fail?1:0);
 })().catch(e=>{ console.error('EXEC ERROR', e); process.exit(1); });

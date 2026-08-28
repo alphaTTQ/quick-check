@@ -71,7 +71,7 @@ const dB='201,1,1,1,2,612170710,ノルバスク錠５ｍｇ,1,1,錠';
   // 2) 新しい処方を読む → 比較・保存更新
   await processScanned(parseJahis(RX(A,NAIKA,'20260313',dB)));
   ok(api.getMeta().mode==='compare' && api.getMeta().storedSide==='prev', '2. 新→旧: 保存分が前回側');
-  ok(result().includes('比較対象') && result().includes('保存から自動取得'), '2. 比較対象と出所を明示');
+  ok(result().includes('Ａ病院') && result().includes('保存から自動取得'), '2. 比較対象（医療機関）と出所を明示');
   ok((await Store.all()).length===1 && (await Store.all())[0].date==='20260313', '2. 保存が新しい方に置き換わる');
 
   // 3) 古い紙をあとから読む → 前回側として比較・保存は最新のまま
