@@ -87,6 +87,8 @@ button.ghost:hover:not(:disabled){background:#e9edf1}
 .count.del{background:var(--del-bg);border-color:var(--del-line);color:var(--del)}
 .count.chg{background:var(--chg-bg);border-color:var(--chg-line);color:var(--chg)}
 .count.same{background:var(--same-bg);border-color:var(--same-line);color:var(--same)}
+.count[data-kind]{cursor:pointer;user-select:none;-webkit-tap-highlight-color:rgba(0,0,0,.08)}
+.count[data-kind]:active{transform:scale(.96)}
 table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{border:1px solid var(--line);padding:7px 9px;vertical-align:top;text-align:left}
 th{background:#eef1f4;font-size:12px;color:var(--sub);font-weight:600;white-space:nowrap}
@@ -248,6 +250,17 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
       </span>
     </div>
     <div class="msg" id="msg-cam"></div>
+  </div>
+</dialog>
+
+<dialog id="listDlg">
+  <div class="dlg">
+    <h2 id="listTitle"></h2>
+    <div id="listBody" style="max-height:60vh;overflow:auto"></div>
+    <div class="scanbar">
+      <span></span>
+      <span><button onclick="document.getElementById('listDlg').close()">閉じる</button></span>
+    </div>
   </div>
 </dialog>
 
@@ -1214,6 +1227,7 @@ function renderResult(){
   /* ---- 比較 ---- */
   const cm=compareMeta||{};
   const r=compare(state.prev, state.curr);
+  lastCompare=r;                       // 件数タップの一覧表示用に保持
   const pd=parseJDate(state.prev.交付年月日), cd=parseJDate(state.curr.交付年月日);
 
   let h='';
@@ -1231,11 +1245,12 @@ function renderResult(){
     h+=`<div class="alert info">一包化・粉砕などの指示・備考は保存対象外のため比較していません。いま読み取った処方せんの指示は下の「処方内容」欄で確認できます。</div>`;
   h+=r.alerts.map(a=>`<div class="alert ${a.level}">${esc(a.text)}</div>`).join('');
   h+=`<div class="counts">
-    <div class="count del"><div class="n">${r.counts.del}</div><div class="l">中止（前回のみ）</div></div>
-    <div class="count add"><div class="n">${r.counts.add}</div><div class="l">新規（今回のみ）</div></div>
-    <div class="count chg"><div class="n">${r.counts.chg}</div><div class="l">変更あり</div></div>
-    <div class="count same"><div class="n">${r.counts.same}</div><div class="l">継続（変更なし）</div></div>
-  </div>`;
+    <div class="count del" data-kind="del" role="button" tabindex="0"><div class="n">${r.counts.del}</div><div class="l">中止（前回のみ）</div></div>
+    <div class="count add" data-kind="add" role="button" tabindex="0"><div class="n">${r.counts.add}</div><div class="l">新規（今回のみ）</div></div>
+    <div class="count chg" data-kind="chg" role="button" tabindex="0"><div class="n">${r.counts.chg}</div><div class="l">変更あり</div></div>
+    <div class="count same" data-kind="same" role="button" tabindex="0"><div class="n">${r.counts.same}</div><div class="l">継続（変更なし）</div></div>
+  </div>
+  <p class="sub noprint" style="margin:-6px 0 12px">件数をタップすると薬品の一覧を表示します</p>`;
 
   h+=`<table><thead><tr>
     <th style="width:5.5em">区分</th><th>薬品</th><th style="width:24%">前回</th><th style="width:24%">今回</th><th style="width:27%">相違点</th>
@@ -1966,6 +1981,44 @@ function loadDemo(){
 
 renderResult();
 Store.init().then(renderStoreInfo).catch(()=>renderStoreInfo());
+
+/* 突合結果の件数タップ → 該当する薬品の一覧をポップアップ表示
+   変更ありは名前＋相違点、中止・新規・継続は名前のみ */
+let lastCompare=null;
+function showKindList(kind){
+  if(!lastCompare) return;
+  const rows=lastCompare.rows.filter(x=>x.kind===kind);
+  const title={del:'中止（前回のみ）', add:'新規（今回のみ）', chg:'変更あり', same:'継続（変更なし）'}[kind]||'';
+  let h;
+  if(!rows.length){
+    h='<p class="sub">該当する薬品はありません。</p>';
+  }else if(kind==='chg'){
+    h=rows.map(row=>{
+      const nameHtml=(row.prev&&row.curr&&norm(row.prev.名称)!==norm(row.curr.名称))
+        ? `${esc(row.prev.名称)}<span class="arrow">→</span>${esc(row.curr.名称)}`
+        : esc((row.curr||row.prev).名称||'（名称なし）');
+      const ch=row.changes.length
+        ? '<ul class="chg-list">'+row.changes.map(c=>
+            `<li><span class="k">${esc(c.k)}</span>${esc(c.a)}<span class="arrow">→</span><b>${esc(c.b)}</b></li>`).join('')+'</ul>'
+        : '<div class="meta">名称のみの相違です</div>';
+      return `<div class="rp"><div class="rp-body"><div class="rp-drug"><span class="dname">${nameHtml}</span></div>${ch}</div></div>`;
+    }).join('');
+  }else{
+    h='<div class="rp"><div class="rp-body">'
+      +rows.map(row=>{
+        const d=row.curr||row.prev;
+        return `<div class="rp-drug"><span class="dname">${esc(d.名称||'（名称なし）')}</span></div>`;
+      }).join('')
+      +'</div></div>';
+  }
+  document.getElementById('listTitle').textContent=`${title}　${rows.length}件`;
+  document.getElementById('listBody').innerHTML=h;
+  document.getElementById('listDlg').showModal();
+}
+document.getElementById('result').addEventListener('click', e=>{
+  const c=e.target && e.target.closest ? e.target.closest('.count[data-kind]') : null;
+  if(c) showKindList(c.getAttribute('data-kind'));
+});
 
 // 候補確認ボタンの委譲リスナー（インラインonclickは使わない。第2回監査指摘2:
 // 保存レコードのidを属性値としてHTMLに埋め込まず、pendingScan内の添字で対応付ける）
