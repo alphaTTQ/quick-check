@@ -47,7 +47,7 @@ const mm=html.match(/var DRUG_MASTER_RAW ?= ?[\s\S]*?;\r?\n/);
 vm.runInContext(mm?mm[0]:'var DRUG_MASTER_RAW="";', ctx);
 vm.runInContext('var DRUG_MASTER_INFO=null;', ctx);
 vm.runInContext(html.slice(html.lastIndexOf('<script>')+8, html.lastIndexOf('</script>')), ctx);
-const api=vm.runInContext('({handleScan,closeCamera,cam,sessions,newSession})', ctx);
+const api=vm.runInContext('({handleScan,closeCamera,cam,sessions,newSession,processScanned,parseJahis,Store,goScan,getView:()=>currentView})', ctx);
 
 const sym=(idx,total,parity)=>({binaryData:[74,65,72,73,83,49,48],
   chunks:[{type:'structuredappend',currentSequence:idx,totalSequence:total-1,parity:parity}]});
@@ -79,6 +79,36 @@ doc.getElementById('camDlg').open=true;
 api.closeCamera();
 ok(doc.getElementById('msg-scan').textContent==='', '3-5. 読取完了後の自動クローズでは中止メッセージを出さない');
 
+/* ===== 5: 2画面構成 ===== */
+ok(html.includes('id="view-scan"') && html.includes('id="view-result"'), '5-1. 読み取り画面と結果画面が分かれている');
+ok(html.includes('>テストモード<'), '5-2. ヘッダーに小さなテストモードボタン');
+ok(!html.includes('>デモデータ<'), '5-3. デモデータボタンは無い');
+{
+  const header=html.slice(html.indexOf('<header>'), html.indexOf('</header>'));
+  ok(!header.includes('結果を印刷') && !header.includes('画面をクリア'), '5-4. ヘッダーから印刷・クリアを撤去');
+  const vr=html.slice(html.indexOf('id="view-result"'), html.indexOf('<input type="file"'));
+  ok(vr.includes('次の処方せんを読む') && vr.includes('読み取り画面へ') && vr.includes('結果を印刷'),
+     '5-5. 結果画面に［次の処方せんを読む］［読み取り画面へ］［結果を印刷］');
+  const scanView=html.slice(html.indexOf('id="view-scan"'), html.indexOf('id="view-result"'));
+  ok(!scanView.includes('id="result"'), '5-6. 読み取り画面に結果表示が無い');
+}
+
+/* ===== 6: 画面遷移の動作 ===== */
+(async()=>{
+  await api.Store.init();
+  ok(api.getView()==='scan', '6-1. 起動時は読み取り画面');
+  const RX=['JAHIS10','1,1,1234567,13,Ａ病院','4,2,01,内科','11,,日薬 太郎,ﾆﾁﾔｸ ﾀﾛｳ','12,1','13,19600606',
+    '51,20260313','101,1,1,,28','111,1,1,,１日１回朝食後,1',
+    '201,1,1,1,2,612170709,ノルバスク錠２．５ｍｇ,1,1,錠'].join('\r\n');
+  await api.processScanned(api.parseJahis(RX));
+  ok(api.getView()==='result', '6-2. 読取成立で結果画面へ自動遷移');
+  api.goScan();
+  ok(api.getView()==='scan', '6-3. ［読み取り画面へ］で戻れる');
+  await api.processScanned(api.parseJahis(RX));
+  ok(api.getView()==='result', '6-4. 登録済み判定でも結果画面に遷移する');
+  process.exit(fail?1:0);
+})().catch(e=>{ console.error('EXEC ERROR', e); process.exit(1); });
+
 /* ===== 4: カメラ画面の並び順（QR番号がボタンより上） ===== */
 {
   const d=html.slice(html.indexOf('<dialog id="camDlg">'), html.indexOf('</dialog>', html.indexOf('<dialog id="camDlg">')));
@@ -87,5 +117,3 @@ ok(doc.getElementById('msg-scan').textContent==='', '3-5. 読取完了後の自�
   ok(iVideo<iSlots, '4-1. QR番号は映像の下にある');
   ok(iSlots<iSound && iSlots<iClose, '4-2. QR番号は［音の確認］［閉じる］より上にある');
 }
-
-process.exit(fail?1:0);

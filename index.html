@@ -182,13 +182,12 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
   </div>
   <div class="noprint" style="text-align:right">
     <span class="privacy">90日で自動削除されます。</span>
-    <div class="btnrow" style="justify-content:flex-end">
-      <button onclick="window.print()">結果を印刷</button>
-      <button onclick="loadDemo()">デモデータ</button>
-      <button onclick="clearAll()">画面をクリア</button>
-    </div>
+    <button class="ghost" style="font-size:12px;padding:2px 8px;min-height:0" onclick="loadDemo()">テストモード</button>
   </div>
 </header>
+
+<!-- ============ 画面1: 読み取り画面 ============ -->
+<section id="view-scan">
 
 <div class="panes noprint" style="grid-template-columns:1fr">
   <section class="pane curr" id="pane-scan">
@@ -218,7 +217,18 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
   </div>
 </div>
 
-<div id="result"></div>
+</section>
+
+<!-- ============ 画面2: 結果画面（読取が成立すると自動で切り替わる） ============ -->
+<section id="view-result" class="hidden">
+  <div class="btnrow noprint" style="position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 0;margin-bottom:6px">
+    <button class="primary" onclick="scanNext()">次の処方せんを読む</button>
+    <button onclick="goScan()">読み取り画面へ</button>
+    <button onclick="window.print()">結果を印刷</button>
+  </div>
+  <div class="msg" id="msg-result"></div>
+  <div id="result"></div>
+</section>
 
 <input type="file" id="filepick" accept="image/*" class="hidden">
 <input type="file" id="jsonpick" accept="application/json,.json" class="hidden">
@@ -11227,6 +11237,33 @@ const state = {prev:null, curr:null};
 /** 表示モード: null / {mode:'first', noSave?} / {mode:'compare', storedSide:'prev'|'curr', demo?} */
 let compareMeta = null;
 
+/* ---------- 画面切替（読み取り画面 ⇄ 結果画面） ----------
+   読取が成立すると結果画面へ自動遷移する。スマホの「戻る」で
+   読み取り画面へ戻れるよう、結果表示時に履歴を1つ積む。 */
+let currentView='scan';
+function showView(v, fromHistory){
+  currentView=v;
+  document.getElementById('view-scan').classList.toggle('hidden', v!=='scan');
+  document.getElementById('view-result').classList.toggle('hidden', v!=='result');
+  if(!fromHistory && v==='result'){
+    try{ if(location.hash!=='#result') history.pushState({view:'result'},'','#result'); }catch(e){}
+  }
+  try{ window.scrollTo(0,0); }catch(e){}
+}
+function goScan(){
+  try{ if(location.hash==='#result'){ history.back(); return; } }catch(e){}
+  showView('scan', true);
+}
+/** 結果画面から次の処方せんを読む。読み取り画面の主ボタン（環境により
+ *  カメラ/撮影のどちらか）と同じ動作をする */
+function scanNext(){
+  const b=document.querySelector('#pane-scan .btnrow button.primary');
+  if(b && b.click) b.click(); else openCamera('scan');
+}
+window.addEventListener('popstate', ()=>{
+  showView((typeof location!=='undefined' && location.hash==='#result')?'result':'scan', true);
+});
+
 /** 比較キーの表示名（医療機関＋診療科） */
 function rxKeyText(rx){
   const hosp=(rx.hosp&&rx.hosp.名称)||'医療機関名不明';
@@ -11427,10 +11464,13 @@ function missingText(s){
 function msg(t, text, cls){
   const el=document.getElementById('msg-'+t); if(!el) return;
   el.className='msg show '+(cls||'ok'); el.textContent=text;
+  const mr=document.getElementById('msg-result');
+  if(mr){ mr.className='msg show '+(cls||'ok'); mr.textContent=text; }
   if(cam.target===t){ const m=document.getElementById('msg-cam'); m.className='msg show '+(cls||'ok'); m.textContent=text; }
 }
 function clearMsg(t){
   const el=document.getElementById('msg-'+t); if(el) el.className='msg';
+  const mr=document.getElementById('msg-result'); if(mr) mr.className='msg';
   const m=document.getElementById('msg-cam'); if(m) m.className='msg';
 }
 
@@ -11481,6 +11521,7 @@ function finalize(t, bytes, parityBad){
 let pendingScan=null;   // 候補確認待ち: {rx, keys, cand, candidates:[rec]}
 async function processScanned(rx){
   pendingScan=null;
+  showView('result');   // 読取成立＝結果画面へ（パース失敗時はここに来ない）
   let keys=[], cand='', found=null, candidates=[], storeOK=true;
   try{
     await Store.ready();                       // 初期化完了前は保存・自動比較を許可しない
@@ -12071,6 +12112,7 @@ function loadDemo(){
   state.prev=parseJahis(DEMO_PREV); state.curr=parseJahis(DEMO_CURR);
   compareMeta={mode:'compare', storedSide:'prev', demo:true};
   renderResult();
+  showView('result');
   msg('scan','デモデータを表示しています（保存はしていません）。','ok');
 }
 
