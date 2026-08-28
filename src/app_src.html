@@ -229,6 +229,7 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
     <h2 id="camTitle">カメラで読取</h2>
     <p class="sub">処方せんのQRコードを枠いっぱいに写してください。分割QRは全て読み取るまで続けてかざします。</p>
     <video id="video" playsinline muted></video>
+    <div class="slots" id="slots-cam"></div>
     <div class="scanbar">
       <span id="scanState">カメラを起動しています…</span>
       <span>
@@ -236,7 +237,6 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
         <button onclick="closeCamera()">閉じる</button>
       </span>
     </div>
-    <div class="slots" id="slots-cam"></div>
     <div class="msg" id="msg-cam"></div>
   </div>
 </dialog>

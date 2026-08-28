@@ -79,4 +79,13 @@ doc.getElementById('camDlg').open=true;
 api.closeCamera();
 ok(doc.getElementById('msg-scan').textContent==='', '3-5. 読取完了後の自動クローズでは中止メッセージを出さない');
 
+/* ===== 4: カメラ画面の並び順（QR番号がボタンより上） ===== */
+{
+  const d=html.slice(html.indexOf('<dialog id="camDlg">'), html.indexOf('</dialog>', html.indexOf('<dialog id="camDlg">')));
+  const iVideo=d.indexOf('id="video"'), iSlots=d.indexOf('id="slots-cam"');
+  const iSound=d.indexOf('音の確認'), iClose=d.indexOf('閉じる');
+  ok(iVideo<iSlots, '4-1. QR番号は映像の下にある');
+  ok(iSlots<iSound && iSlots<iClose, '4-2. QR番号は［音の確認］［閉じる］より上にある');
+}
+
 process.exit(fail?1:0);
