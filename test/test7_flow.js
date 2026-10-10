@@ -68,23 +68,25 @@ const dB='201,1,1,1,2,612170710,ノルバスク錠５ｍｇ,1,1,錠';
   ok(result().includes('Ａ病院') && result().includes('内科'), '1. どのキーの初回かを表示');
   ok((await Store.all()).length===1, '1. 保存1件');
 
-  // 2) 新しい処方を読む → 比較・保存更新
+  // 2) 新しい処方を読む → 履歴と比較し、履歴に追加（上書きしない）
   await processScanned(parseJahis(RX(A,NAIKA,'20260313',dB)));
-  ok(api.getMeta().mode==='compare' && api.getMeta().storedSide==='prev', '2. 新→旧: 保存分が前回側');
-  ok(result().includes('Ａ病院') && result().includes('保存から自動取得'), '2. 比較対象（医療機関）と出所を明示');
-  ok((await Store.all()).length===1 && (await Store.all())[0].date==='20260313', '2. 保存が新しい方に置き換わる');
+  ok(api.getMeta().mode==='compare' && api.getMeta().history.length===1, '2. 2回目: 履歴1件（2/13）と比較');
+  ok(result().includes('Ａ病院') && result().includes('2/13'), '2. 比較対象（医療機関）と前回処方日を明示');
+  ok((await Store.all()).length===2, '2. 今回分は履歴に追加される（上書きしない）');
 
-  // 3) 古い紙をあとから読む → 前回側として比較・保存は最新のまま
-  await processScanned(parseJahis(RX(A,NAIKA,'20260213',dA)));
-  ok(api.getMeta().storedSide==='curr', '3. 旧→新: 読んだ方が前回側になる');
-  ok(result().includes('保存分より古いため'), '3. 逆転の説明を表示');
-  ok((await Store.all())[0].date==='20260313', '3. 保存は最新のまま上書きされない');
+  // 3) 古い紙をあとから読む → その日より前の記録と比べる（なければ初回扱い）
+  await processScanned(parseJahis(RX(A,NAIKA,'20260120',dA)));
+  ok(api.getMeta().mode==='first' && api.getMeta().newerDate==='20260313',
+     '3. 古い紙: この日より前の記録がなければ初回扱い（新しい記録がある旨を保持）');
+  ok(result().includes('この日より前の処方は保存されていません'), '3. 新しい記録がある旨を表示');
+  ok((await Store.all()).length===3, '3. 古い紙も日付どおり履歴に入る');
 
-  // 4) 同日・内容違い（訂正処方せん）→ 読んだ方が今回
+  // 4) 同日・内容違い → 同日の処方とは比べず、それより前の履歴と比べる
   //    ※ 同日・内容も同一の場合は「すでに登録済み」となり取り込まない（test12_rescan）
   const dC='201,1,1,1,2,612170711,ノルバスク錠１０ｍｇ,1,1,錠';
   await processScanned(parseJahis(RX(A,NAIKA,'20260313',dC)));
-  ok(api.getMeta().storedSide==='prev', '4. 同日交付（内容違い）は読んだ方を「今回」とする');
+  ok(api.getMeta().mode==='compare' && api.getMeta().sameDay===1 && api.getMeta().history.length===2,
+     '4. 同日の別処方: 同日分とは比べず、それより前の履歴（1/20・2/13）と比べる');
 
   // 5) 同一患者・同一機関でも診療科が違えば初回
   await processScanned(parseJahis(RX(A,SEIKEI,'20260313',dA)));
@@ -93,7 +95,8 @@ const dB='201,1,1,1,2,612170710,ノルバスク錠５ｍｇ,1,1,錠';
   // 6) 診療科なしも独立キー
   await processScanned(parseJahis(RX(A,null,'20260313',dA)));
   ok(api.getMeta().mode==='first', '6. 診療科なしは内科と混同されず初回になる');
-  ok((await Store.all()).length===3, '6. 保存は3キー分（内科・整形外科・診療科なし）');
+  { const all=await Store.all(); const groups=new Set(all.map(r=>[...r.keys].sort().join('|')));
+    ok(groups.size===3 && all.length===6, '6. 履歴は3キー分（内科4枚・整形外科1枚・診療科なし1枚）'); }
 
   // 7) 患者情報が保存に残らない
   const dump=JSON.stringify(await Store.all());
@@ -102,16 +105,16 @@ const dB='201,1,1,1,2,612170710,ノルバスク錠５ｍｇ,1,1,錠';
   // 8) 90日purge
   await Store.putRec({id:'old', keys:['oldkey'], date:'20250101',
                       savedAt:Date.now()-91*86400000, text:'JAHIS10\r\n'});
-  ok((await Store.all()).length===4, '8. 91日前の擬似レコードを投入');
+  ok((await Store.all()).length===7, '8. 91日前の擬似レコードを投入');
   await Store.init();   // 起動時のhousekeepingを再実行
   const after=await Store.all();
-  ok(after.length===3 && !after.some(r=>r.id==='old'), '8. 90日を過ぎた保存が自動削除される');
+  ok(after.length===6 && !after.some(r=>r.id==='old'), '8. 90日を過ぎた保存が自動削除される（1枚単位）');
 
   // 9) 患者情報なしのQRは保存しない
   await processScanned(parseJahis(['JAHIS10',A,'51,20260313','101,1,1,,28',
     '111,1,1,,毎食後,3',dA].join('\r\n')));
   ok(api.getMeta().mode==='first' && api.getMeta().noSave===true, '9. 患者情報なしは表示のみ（noSave）');
-  ok((await Store.all()).length===3, '9. 保存件数は増えない');
+  ok((await Store.all()).length===6, '9. 保存件数は増えない');
 
   process.exit(fail?1:0);
 })().catch(e=>{ console.error('EXEC ERROR', e); process.exit(1); });

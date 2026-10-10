@@ -5,7 +5,7 @@ const cut=app.indexOf('4. 画面描画');
 const core=app.slice(0, app.lastIndexOf('/* ===', cut));
 const ctx={console,TextDecoder,TextEncoder,crypto:{getRandomValues:a=>crypto.randomFillSync(a)},indexedDB:undefined,localStorage:undefined};
 vm.createContext(ctx); vm.runInContext(core, ctx);
-const {sha256hex, recordKeys, chooseRecord, parseJahis}=ctx;
+const {sha256hex, recordKeys, splitHistory, parseJahis}=vm.runInContext('({sha256hex, recordKeys, splitHistory, parseJahis})', ctx);
 
 let fail=0; const ok=(c,m)=>{console.log((c?'PASS':'FAIL')+'  '+m); if(!c)fail++;};
 
@@ -54,11 +54,16 @@ ok(recordKeys(parseJahis(['JAHIS10','11,,日薬 太郎,','12,1','51,20260313','1
 ok(!A[0].includes('日薬') && /^[0-9a-f]{64}$/.test(A[0]), '鍵は64桁の16進で、氏名を含まない');
 
 // --- どちらを保存に残すか ---
-ok(chooseRecord(null,'20260313')==='save', '保存がなければ保存する');
-ok(chooseRecord({date:'20260213'},'20260313')==='save', '今回の方が新しければ上書きする');
-ok(chooseRecord({date:'20260313'},'20260213')==='keep', '前回処方をあとから読んでも上書きしない');
-ok(chooseRecord({date:'20260313'},'20260313')==='save', '同じ交付日なら読み直しを反映する');
-ok(chooseRecord({date:''},'20260313')==='keep', '保存側に交付日がなければ置き換えない（新旧判定不能・監査修正2）');
+{
+  const g=[{date:'20260213'},{date:'20260227'},{date:'20260313'},{date:'20260413'}];
+  const sp=splitHistory(g,'20260313');
+  ok(sp.before.length===2 && sp.before.every(r=>r.date<'20260313'), '履歴: 今回より前の日付だけを比較対象にする');
+  ok(sp.sameDay.length===1, '履歴: 同日の別処方は比較対象から外して数える');
+  ok(sp.newer.length===1 && sp.newer[0].date==='20260413', '履歴: 今回より新しい記録を把握する（古い紙を後から読んだ場合）');
+  const su=splitHistory(g,'');
+  ok(su.dateUnknown===true && su.before.length===4, '履歴: 交付日不明なら全件を対象にし、判定不能として扱う');
+  ok(splitHistory([],'20260313').before.length===0, '履歴: 記録がなければ空');
+}
 
 /* --- 医療機関×診療科でキーが分かれる --- */
 const mkRx=(extra)=>parseJahis(['JAHIS10', ...extra,

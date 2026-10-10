@@ -187,7 +187,8 @@ const RX=(date,drug)=>['JAHIS10','1,1,1234567,13,Ａ病院','4,2,01,内科',...P
         put(){}, delete(){}, clear(){}, createIndex(){},
         get(){ const r={}; setTimeout(()=>r.onsuccess&&r.onsuccess(),0); return r; },
         getAll(){ const r={result:[]}; setTimeout(()=>r.onsuccess&&r.onsuccess(),0); return r; },
-        index(){ return { get(){ const r={}; setTimeout(()=>r.onsuccess&&r.onsuccess(),0); return r; } }; },
+        index(){ return { get(){ const r={}; setTimeout(()=>r.onsuccess&&r.onsuccess(),0); return r; },
+                          getAll(){ const r={result:[]}; setTimeout(()=>r.onsuccess&&r.onsuccess(),0); return r; } }; },
       });
       const db={ createObjectStore(){ return mkStore(); },
         transaction(_, rw){

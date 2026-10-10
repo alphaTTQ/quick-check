@@ -73,7 +73,7 @@ const RX=(hospLine, patient, date)=>['JAHIS10',hospLine,'4,2,01,内科',...patie
     '201,1,1,1,2,612170710,ノルバスク錠５ｍｇ,1,1,錠'].join('\r\n'));   // 51レコードなし
   await processScanned(noDate);
   ok(api.getMeta().mode==='compare' && api.getMeta().dateUnknown===true, '2-1. 交付日不明: 比較は表示するが新旧判定しない');
-  ok(result().includes('新しい処方か判定できません'), '2-2. 判定不能を画面に明示');
+  ok(result().includes('判定が正確にできません'), '2-2. 判定不能を画面に明示');
   ok((await Store.all())[0].date==='20260313', '2-3. 既存保存は置換されない');
   // 初回で交付日不明 → 保存しない
   await Store.clear();
@@ -111,13 +111,14 @@ const RX=(hospLine, patient, date)=>['JAHIS10',hospLine,'4,2,01,内科',...patie
   ok(api.getMeta().mode==='candidates', '5-1. 漢字のみ読取: 初回と断定せず候補提示');
   ok(result().includes('同一患者として比較') && result().includes('別人として初回扱い'),
      '5-2. 候補確認のUIが出る（自動で1件に決めない）');
-  const candId=(api.getPending().candidates[0]||{}).id;
-  await api.confirmCandidate(candId);
+  await api.confirmCandidate(0);
   ok(api.getMeta().mode==='compare', '5-3. 確認後は比較が表示される');
-  ok((await Store.all()).length===1, '5-4. レコードが統合されている（分裂しない）');
+  { const all=await Store.all(); const sig=r=>[...r.keys].sort().join('|');
+    ok(all.length===2 && sig(all[0])===sig(all[1]) && all[0].keys.length===2,
+       '5-4. 2枚の処方が同一患者の履歴として連結される（カナ・漢字の両方の鍵を共有）'); }
   // 統合後は自動照合される
   await processScanned(parseJahis(RX('1,1,1234567,13,Ａ病院', KANJI_ONLY, '20260413')));
-  ok(api.getMeta().mode==='compare' && api.getMeta().storedSide==='prev', '5-5. 以後は漢字のみでも自動比較');
+  ok(api.getMeta().mode==='compare' && api.getMeta().history.length===2, '5-5. 以後は漢字のみでも履歴全体と自動比較');
   await processScanned(parseJahis(RX('1,1,1234567,13,Ａ病院', KANA_ONLY, '20260513')));
   ok(api.getMeta().mode==='compare', '5-6. カナのみでも自動比較（逆方向）');
   // 逆方向: 漢字のみ保存 → カナのみ読取

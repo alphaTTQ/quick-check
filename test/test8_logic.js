@@ -1,6 +1,6 @@
-// 比較ロジックの純関数テスト（引き継ぎ完了条件5）
-// キー一致判定は test4_store.js、フロー統合は test7_flow.js。
-// ここでは「この2枚ならこの判定」を関数単体で固定する。
+// 判定ロジックの純関数テスト
+// 日付計算・処方日数・中止判定の期限・90日purge。
+// 履歴突合（compareHistory）のシナリオは test16_history.js。
 const fs=require('fs'), vm=require('vm'), crypto=require('crypto');
 const path=require('path');
 const html=fs.readFileSync(path.join(__dirname,'..','index.html'),'utf8');
@@ -8,47 +8,37 @@ const app=html.slice(html.lastIndexOf('<script>')+8, html.lastIndexOf('</script>
 const core=app.slice(0, app.lastIndexOf('/* ===', app.indexOf('4. 画面描画')));
 const ctx={console,TextDecoder,TextEncoder,crypto:{getRandomValues:a=>crypto.randomFillSync(a)}};
 vm.createContext(ctx); vm.runInContext(core, ctx);
-const {scannedIsCurrent, decideScan, purgeDue, chooseRecord}=
-  vm.runInContext('({scannedIsCurrent, decideScan, purgeDue, chooseRecord})', ctx);
+const {addDays, supplyDays, stopWatchUntil, purgeDue, mdText, STOP_GRACE_MIN}=
+  vm.runInContext('({addDays, supplyDays, stopWatchUntil, purgeDue, mdText, STOP_GRACE_MIN})', ctx);
 
 let fail=0; const ok=(c,m)=>{console.log((c?'PASS':'FAIL')+'  '+m); if(!c)fail++;};
 
-/* ---------- scannedIsCurrent: 新旧判定 ---------- */
-ok(scannedIsCurrent('20260213','20260313')===true,  '読んだ方が新しい → 今回');
-ok(scannedIsCurrent('20260313','20260213')===false, '読んだ方が古い → 前回');
-ok(scannedIsCurrent('20260313','20260313')===true,  '同日 → 読んだ方が今回');
-ok(scannedIsCurrent('','20260313')===false,         '保存側の日付不明 → 新旧を確定しない（監査修正2）');
-ok(scannedIsCurrent('20260313','')===false,         '読んだ方の日付不明 → 新旧を確定しない');
-ok(scannedIsCurrent('','')===false,                 '両方不明 → 新旧を確定しない');
+/* ---------- addDays ---------- */
+ok(addDays('20260213',28)==='20260313', '2/13 + 28日 = 3/13');
+ok(addDays('20260227',5)==='20260304', '2/27 + 5日 = 3/4（月またぎ）');
+ok(addDays('20240228',1)==='20240229', '閏年: 2024/2/28 + 1日 = 2/29');
+ok(addDays('20251231',1)==='20260101', '年またぎ');
+ok(addDays('20260313',0)==='20260313', '0日は同日');
 
-/* ---------- decideScan: 画面の役割分担と保存の置き換え ---------- */
-ok(decideScan(null,'20260313').mode==='first', '保存なし → 初回');
-let d=decideScan({date:'20260213'},'20260313');
-ok(d.mode==='compare' && d.scannedRole==='curr' && d.replaceStored===true,
-   '新しい紙: 読んだ方=今回・保存を置き換える');
-d=decideScan({date:'20260313'},'20260213');
-ok(d.mode==='compare' && d.scannedRole==='prev' && d.replaceStored===false,
-   '古い紙: 読んだ方=前回・保存は置き換えない');
-d=decideScan({date:'20260313'},'20260313');
-ok(d.scannedRole==='curr' && d.replaceStored===true, '同日: 読んだ方=今回・読み直しを反映');
-d=decideScan({date:''},'20260313');
-ok(d.dateUnknown===true && d.replaceStored===false, '保存側日付なし: 判定不能扱いで置き換えない');
-d=decideScan({date:'20260313'},'');
-ok(d.dateUnknown===true && d.replaceStored===false, '読んだ方日付なし: 判定不能扱いで置き換えない');
-ok(decideScan(null,'').noDate===true, '初回かつ日付なし: noDate（保存しない）');
-ok(chooseRecord(null,'')==='keep', '初回でも交付日不明は保存しない');
+/* ---------- supplyDays（内服の日数） ---------- */
+ok(supplyDays({剤形区分:'1', 調剤数量:'28'})===28, '内服28日分');
+ok(supplyDays({剤形区分:'4', 調剤数量:'14'})===14, '内服滴剤14日分');
+ok(supplyDays({剤形区分:'2', 調剤数量:'10'})===null, '頓服は日数として扱わない（回数）');
+ok(supplyDays({剤形区分:'3', 調剤数量:'1'})===null, '外用は日数として扱わない');
+ok(supplyDays({剤形区分:'1', 調剤数量:''})===null, '日数が読めなければ null');
 
-/* ---------- 画面の役割と保存の置き換えが常に一致する（食い違い禁止の不変条件） ---------- */
-const dates=['','20250101','20260213','20260313','20261231'];
-let consistent=true;
-for(const sd of dates) for(const c of dates){
-  const dd=decideScan({date:sd}, c);
-  const save=chooseRecord({date:sd}, c)==='save';
-  if(dd.replaceStored!==save) consistent=false;                    // 画面の置換予告と保存の実際が一致
-  if(dd.replaceStored && dd.scannedRole!=='curr') consistent=false; // 置き換えるなら読んだ方が今回
-  if(dd.dateUnknown && dd.replaceStored) consistent=false;          // 判定不能なのに置き換えは禁止
-}
-ok(consistent, '全date組合せで「保存の置き換え」と画面表示が矛盾しない（25通り）');
+/* ---------- stopWatchUntil（中止とみなす期限 = 最終服用日 + 猶予） ---------- */
+// 28日分: 最終服用日 3/12、猶予 max(7, 14)=14日 → 3/26
+ok(stopWatchUntil('20260213',{剤形区分:'1',調剤数量:'28'})==='20260326', '定期28日分(2/13): 3/26まで中止を見張る');
+// 5日分: 最終服用日 3/3、猶予 max(7, 3)=7日 → 3/10
+ok(stopWatchUntil('20260227',{剤形区分:'1',調剤数量:'5'})==='20260310', '臨時5日分(2/27): 3/10まで');
+ok(stopWatchUntil('20260227',{剤形区分:'1',調剤数量:'5'})<'20260313', '臨時5日分は3/13の来局時には期限切れ（中止に出ない）');
+ok(stopWatchUntil('20260213',{剤形区分:'1',調剤数量:'28'})>='20260323', '定期28日分は10日遅れの来局(3/23)でも見張り中');
+ok(stopWatchUntil('20260213',{剤形区分:'2',調剤数量:'10'})===null, '頓服は期限を出さない（直前の処方で判定）');
+ok(STOP_GRACE_MIN===7, '猶予の下限は7日');
+
+/* ---------- mdText ---------- */
+ok(mdText('20260213')==='2/13' && mdText('')==='不明', '日付の短縮表示');
 
 /* ---------- purgeDue: 90日purge対象判定 ---------- */
 const DAY=86400000, now=1770000000000;

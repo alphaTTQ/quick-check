@@ -85,7 +85,8 @@ const RX=(patient,date,drug)=>['JAHIS10','1,1,1234567,13,Ａ病院','4,2,01,内�
         put(){}, delete(){}, clear(){}, createIndex(){},
         get(){ const r={}; setTimeout(()=>r.onsuccess&&r.onsuccess(),0); return r; },
         getAll(){ const r={result:[]}; setTimeout(()=>r.onsuccess&&r.onsuccess(),0); return r; },
-        index(){ return { get(){ const r={}; setTimeout(()=>r.onsuccess&&r.onsuccess(),0); return r; } }; },
+        index(){ return { get(){ const r={}; setTimeout(()=>r.onsuccess&&r.onsuccess(),0); return r; },
+                          getAll(){ const r={result:[]}; setTimeout(()=>r.onsuccess&&r.onsuccess(),0); return r; } }; },
       });
       const db={ createObjectStore(){ return mkStore(); },
         transaction(){ const tx={ objectStore(){ return mkStore(); } };
@@ -136,7 +137,8 @@ const RX=(patient,date,drug)=>['JAHIS10','1,1,1234567,13,Ａ病院','4,2,01,内�
         put(){}, delete(){}, clear(){}, createIndex(){},
         get(){ const r={}; setTimeout(()=>r.onsuccess&&r.onsuccess(),0); return r; },
         getAll(){ const r={result:[]}; setTimeout(()=>r.onsuccess&&r.onsuccess(),0); return r; },
-        index(){ return { get(){ const r={}; setTimeout(()=>r.onsuccess&&r.onsuccess(),0); return r; } }; },
+        index(){ return { get(){ const r={}; setTimeout(()=>r.onsuccess&&r.onsuccess(),0); return r; },
+                          getAll(){ const r={result:[]}; setTimeout(()=>r.onsuccess&&r.onsuccess(),0); return r; } }; },
       });
       const db={
         createObjectStore(){ return mkStore(); },
@@ -178,8 +180,10 @@ const RX=(patient,date,drug)=>['JAHIS10','1,1,1234567,13,Ａ病院','4,2,01,内�
     ok(validateBackup(bk(rec()), now).ok===true, '正常レコードは通る');
     ok(validateBackup(bk(rec({date:'20261399'})), now).ok===false, '非実在交付日(20261399)は拒否');
     ok(validateBackup(bk(rec({savedAt:now+3600000})), now).ok===false, '未来のsavedAtは拒否');
-    ok(validateBackup(bk(rec(), rec({id:hex('b'), keys:[hex('a')], text:text('20260313')})), now).ok===false,
-       'レコード間の照合キー重複は拒否（別処方の誤比較防止）');
+    ok(validateBackup(bk(rec(), rec({id:hex('b'), keys:[hex('a')], text:text('20260313')})), now).ok===true,
+       '同じ鍵の組み合わせを共有する記録（同一患者の履歴）は受け付ける');
+    ok(validateBackup(bk(rec(), rec({id:hex('b'), keys:[hex('a'),hex('c')], text:text('20260313')})), now).ok===false,
+       '鍵を共有するのに組み合わせが食い違う記録は拒否（別患者の履歴の連結防止）');
     ok(validateBackup(bk(rec({date:'20260101'})), now).ok===false,
        '処方テキストの交付日とdateの不一致は拒否');
     const evilId="');alert(document.title);//";

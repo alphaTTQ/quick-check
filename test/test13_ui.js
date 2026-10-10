@@ -17,7 +17,7 @@ ok(!html.includes('通信しない設計です'), '1-5. 「通信しない設計
 ok(/class="privacy">90日で自動削除されます。<\/span>/.test(html), '1-6. 「90日で自動削除されます。」のみ残っている');
 ok(!html.includes('torchBtn') && !html.includes('toggleTorch'), '2-1. ライトボタンのコードが残っていない');
 ok(!/>ライト</.test(html), '2-2. ライトボタンが画面に無い');
-ok(html.includes('id="verbadge"') && html.includes('>Ver 1.0<'), '2-3. 右下にVer 1.0の表示がある');
+ok(html.includes('id="verbadge"') && html.includes('>Ver 1.1<'), '2-3. 右下にバージョン表示（Ver 1.1）がある');
 
 /* ===== 3: 閉じるでのリセット ===== */
 function mkEl(){ const el={

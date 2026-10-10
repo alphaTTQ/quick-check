@@ -100,6 +100,9 @@ button.ghost:hover:not(:disabled){background:#e9edf1}
   #resultbar button.primary{flex-shrink:0}
 }
 table{border-collapse:collapse;width:100%;font-size:13px}
+/* 突合表はスマホ幅を超えるため、表だけを横スクロールさせる（カード全体が画面からはみ出さないように） */
+.tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
+.tblwrap table{min-width:640px}
 th,td{border:1px solid var(--line);padding:7px 9px;vertical-align:top;text-align:left}
 th{background:#eef1f4;font-size:12px;color:var(--sub);font-weight:600;white-space:nowrap}
 tr.r-add td{background:var(--add-bg)}
@@ -199,7 +202,7 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
   </div>
 </header>
 
-<div id="verbadge" class="noprint">Ver 1.0</div>
+<div id="verbadge" class="noprint">Ver 1.1</div>
 
 <!-- ============ 画面1: 読み取り画面 ============ -->
 <section id="view-scan">
@@ -698,8 +701,106 @@ function compare(prevRx, currRx){
   return {rows, counts, alerts};
 }
 
+/* ---------- 履歴突合（薬ごとに、その薬が最後に出た処方までさかのぼる） ----------
+   直前の1回とだけ比べると、定期処方の間に臨時処方が挟まったとき
+   定期薬が全部「新規」、臨時薬が「中止」と出てしまう。そこで今回の各薬について
+   履歴からその薬の最終処方を探して比べる。
+   中止の判定は処方日数で行う: 内服薬は「最終処方日＋日数＋猶予」までに来局して
+   その薬が出ていなければ中止。臨時薬（短期）は期間が過ぎていれば中止に出さない。
+   頓服・外用など日数が分からないものは、直前の処方に入っていた場合だけ中止とする。 */
+const STOP_GRACE_MIN=7;   // 来局の遅れを見込む猶予日数の下限（日数の半分と大きい方）
+
+/** YYYYMMDD に n 日足した YYYYMMDD */
+function addDays(key, n){
+  const t=new Date(Date.UTC(+key.slice(0,4), +key.slice(4,6)-1, +key.slice(6,8)+n));
+  return String(t.getUTCFullYear()).padStart(4,'0')+String(t.getUTCMonth()+1).padStart(2,'0')+String(t.getUTCDate()).padStart(2,'0');
+}
+/** 内服の調剤数量（日数）。内服・内服滴剤以外や読めない場合は null */
+function supplyDays(rp){
+  if(!(rp.剤形区分==='1'||rp.剤形区分==='4')) return null;
+  const n=numOf(rp.調剤数量);
+  return (n && n>=1) ? Math.round(n) : null;
+}
+/** 中止とみなす期限（最終服用日＋猶予）。日数が分からなければ null */
+function stopWatchUntil(date, rp){
+  const n=supplyDays(rp); if(!n || !date) return null;
+  return addDays(date, (n-1)+Math.max(STOP_GRACE_MIN, Math.ceil(n/2)));
+}
+/** M/D 表記（年は同一年なら省略しない程度の簡潔表示） */
+function mdText(key){ return key ? (+key.slice(4,6))+'/'+(+key.slice(6,8)) : '不明'; }
+
+/**
+ * 今回の処方を、同一キー（患者×医療機関×診療科）の過去の処方履歴と突合する。
+ *   currRx  : 今回の処方（parseJahis済み）
+ *   history : [{date:'YYYYMMDD', rx}]（今回より前の交付日のもの。保存分なので補足は持たない）
+ *   currDate: 今回の交付日キー（不明なら ''）
+ * 戻り値 {rows, counts, alerts, latestDate}
+ *   rows[i] = {kind:'add'|'del'|'chg'|'same', prev, curr, changes, spec, match, lastDate, gapNote}
+ */
+function compareHistory(currRx, history, currDate){
+  const sorted=[...history].sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:0);   // 新しい順
+  const latestDate=sorted.length ? sorted[0].date : '';
+
+  // 薬の同一性ごとに「最後に出た日」の出現だけを集める（同日に複数RPあれば全部）
+  const lastSeen=new Map(), prev=[];
+  for(const h of sorted){
+    for(const d of h.rx.drugs){
+      const id=keyCode(d)||keyName(d); if(!id) continue;
+      if(lastSeen.has(id) && lastSeen.get(id)!==h.date) continue;
+      lastSeen.set(id, h.date);
+      prev.push(Object.assign(d, {_m:null, _date:h.date}));
+    }
+  }
+  const curr=currRx.drugs.map(d=>Object.assign(d, {_m:null}));
+  const pairs=[];
+  runPass(prev,curr,keyCode,'code',pairs);
+  runPass(prev,curr,keyName,'name',pairs);
+  runPass(prev,curr,keyBase,'base',pairs);
+
+  const rows=[];
+  for(const pr of pairs){
+    const ch=diffPair(pr.prev, pr.curr, true);   // 履歴は保存分＝自由記述を持たないため指示は比べない
+    const spec = pr.match==='base' && norm(pr.prev.名称)!==norm(pr.curr.名称);
+    if(spec) ch.unshift({k:'薬品名', a:pr.prev.名称, b:pr.curr.名称,
+                         note:'含量を除いた名称が一致します。規格（含量）が変わっていないか確認してください。'});
+    let kind = ch.filter(x=>!x.soft).length ? 'chg' : 'same';
+    if(spec) kind='chg';
+    // 前回の日数をとうに過ぎてから再び出た内服薬は、再開の可能性として知らせる
+    const until=stopWatchUntil(pr.prev._date, pr.prev.rp);
+    const gapNote=(until && currDate && currDate>until)
+      ? `前回処方（${mdText(pr.prev._date)}・${supplyDays(pr.prev.rp)}日分）から間が空いています（再開の可能性）` : '';
+    rows.push({kind, prev:pr.prev, curr:pr.curr, changes:ch, spec, match:pr.match, lastDate:pr.prev._date, gapNote});
+  }
+
+  // 中止: 履歴にあって今回マッチしなかった薬のうち、まだ服用中のはずのもの
+  const currKeys=new Set();
+  for(const c of curr){ for(const k of [keyCode(c),keyName(c)]) if(k) currKeys.add(k); }
+  for(const p of prev){
+    if(p._m) continue;
+    if([keyCode(p),keyName(p)].some(k=>k && currKeys.has(k))) continue;   // 同じ薬が今回別の形で照合済み
+    // 同じ基準名の薬が後の日付で出ている＝規格を切り替えた後の古い規格は中止扱いにしない
+    if(prev.some(q=>q!==p && keyBase(q)===keyBase(p) && q._date>p._date)) continue;
+    const until=stopWatchUntil(p._date, p.rp);
+    const isStop = (until && currDate) ? currDate<=until : p._date===latestDate;
+    if(isStop) rows.push({kind:'del', prev:p, curr:null, changes:[], lastDate:p._date, gapNote:''});
+  }
+  for(const c of curr) if(!c._m) rows.push({kind:'add', prev:null, curr:c, changes:[], lastDate:'', gapNote:''});
+
+  const order={del:0,add:1,chg:2,same:3};
+  rows.sort((a,b)=>(order[a.kind]-order[b.kind]) || ((numOf((a.curr||a.prev).rp.no)||0)-(numOf((b.curr||b.prev).rp.no)||0)));
+
+  const alerts=[];
+  if(rows.some(r=>r.spec))
+    alerts.push({level:'warn', text:'規格（含量）違いの可能性がある薬品があります。同一銘柄で含量が変わっていないか確認してください。'});
+  alerts.push(...singleRxAlerts(currRx));
+
+  const counts={add:0,del:0,chg:0,same:0};
+  rows.forEach(r=>counts[r.kind]++);
+  return {rows, counts, alerts, latestDate};
+}
+
 /* ============================================================
-   3.5 保存（患者ごとに直近1枚だけ）
+   3.5 保存（患者×医療機関×診療科ごとの処方履歴・90日）
    ------------------------------------------------------------
    ・氏名や生年月日そのものは保存しない。照合用のハッシュ鍵に変換して持つ。
      端末を紛失しても、保存データから患者を特定しにくくするため。
@@ -858,46 +959,34 @@ function strictDateKey(v){
 /** 処方せんの交付日キー。実在日付でなければ ''（＝交付日不明として扱う） */
 function issueDateKey(rx){ return strictDateKey(rx.交付年月日); }
 
-/** 読んだ処方せんを「今回」と確定できるか。交付日(YYYYMMDDのキー文字列)で判定。
- *  同日は読んだ方が今回（読取時刻が新しいため）。
- *  **どちらかの日付が不明なら false**＝新旧を判定できない（第1回監査指摘・修正2。
- *  以前は「読んだ方を今回」としており、日付不明のQRが最新の保存を上書きできた）。 */
-function scannedIsCurrent(storedDate, scannedDate){
-  return !!(storedDate && scannedDate) && scannedDate >= storedDate;
-}
-
-/** 保存レコード（無ければnull）と読取交付日から、画面と保存の扱いを決める。
- *  戻り値: {mode:'first', noDate?}
- *        | {mode:'compare', scannedRole:'curr'|'prev', replaceStored:boolean, dateUnknown?}
- *  dateUnknown のとき: 表示上は読んだ方を「今回」の位置に置くが新旧は未確定で、
- *  保存は置き換えない。 */
-function decideScan(existing, scannedDate){
-  if(!existing) return scannedDate ? {mode:'first'} : {mode:'first', noDate:true};
-  if(!scannedDate || !existing.date)
-    return {mode:'compare', scannedRole:'curr', replaceStored:false, dateUnknown:true};
-  const cur=scannedIsCurrent(existing.date, scannedDate);
-  return {mode:'compare', scannedRole:cur?'curr':'prev', replaceStored:cur};
-}
-
 /** 保存期限切れ（purge対象）か。savedAt はエポックms。記録が無いものも対象 */
 function purgeDue(rec, now, keepDays){
   return !rec.savedAt || rec.savedAt < now - keepDays*86400000;
 }
 
-/** 既存の保存分と今読んだ分の、どちらを保存として残すかを決める。
- *  交付日が新しい方を残す（前回処方をあとから読んでも上書きしない）。
- *  交付日が読み取れないものは保存しない・既存を置き換えない（新旧の基準にできないため）。 */
-function chooseRecord(existing, incomingDate){
-  if(!incomingDate) return 'keep';
-  if(!existing) return 'save';
-  return scannedIsCurrent(existing.date, incomingDate) ? 'save' : 'keep';
+/** 同一キーの履歴を、今回の交付日を基準に振り分ける（純関数）。
+ *  比較に使うのは今回より前の日付のものだけ。同日の別処方（定期と臨時が同日など）
+ *  は互いに比較しない。交付日が不明なら日付で振り分けられないので全件を対象にする。 */
+function splitHistory(group, scannedDate){
+  if(!scannedDate) return {before:group.slice(), sameDay:[], newer:[], dateUnknown:true};
+  return {
+    before: group.filter(r=>r.date && r.date<scannedDate),
+    sameDay:group.filter(r=>r.date===scannedDate),
+    newer:  group.filter(r=>r.date>scannedDate),
+    dateUnknown:false,
+  };
 }
 
 const Store=(function(){
-  const DBNAME='shohousen_kansa', VER=1, ST='rx';
-  const LSKEY='shohousen_kansa_v1';
+  // 保存は「1件=1枚の処方せん」。同一キー（患者×医療機関×診療科）の履歴を90日分持つ。
+  // v1.2.x までの「キーごとに直近1回」のDB（shohousen_kansa）とは別DBにし、
+  // 初回起動時に旧DBの内容を引き継ぐ。旧DBは90日後（中身が全て期限切れになった後）に削除する。
+  // 旧版へ戻した場合に旧DBがそのまま使えるよう、移行直後は旧DBに手を付けない。
+  const DBNAME='quickcheck_hist', VER=1, ST='hist';
+  const LSKEY='quickcheck_hist_v1';
+  const OLD_DB='shohousen_kansa', OLD_ST='rx', OLD_LS='shohousen_kansa_v1', OLD_SCHEMA=3;
   let db=null, mode='memory', mem={salt:null, recs:{}};
-  let degraded=null;   // housekeeping失敗時に理由が入る。非nullの間は保存・自動比較を止める
+  let degraded=null;   // 保存領域の障害時に理由が入る。非nullの間は保存・自動比較を止める
 
   function idbReq(r){ return new Promise((res,rej)=>{ r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); }
   /** トランザクション完了待ち。abort/errorを必ずrejectする（第2回監査指摘1。
@@ -921,19 +1010,23 @@ const Store=(function(){
     return initPromise || Promise.reject(new Error('保存領域が未初期化です'));
   }
 
+  function openDB(name, ver, onUpgrade){
+    return new Promise((res,rej)=>{
+      const rq=indexedDB.open(name,ver);
+      rq.onupgradeneeded=(e)=>onUpgrade(rq, e);
+      rq.onsuccess=()=>res(rq.result);
+      rq.onerror=()=>rej(rq.error);
+      rq.onblocked=()=>rej(new Error('blocked'));
+      setTimeout(()=>rej(new Error('timeout')),8000);
+    });
+  }
+
   async function doInit(){
     try{
-      db=await new Promise((res,rej)=>{
-        const rq=indexedDB.open(DBNAME,VER);
-        rq.onupgradeneeded=()=>{
-          const s=rq.result.createObjectStore(ST,{keyPath:'id'});
-          s.createIndex('keys','keys',{multiEntry:true});
-          rq.result.createObjectStore('meta');
-        };
-        rq.onsuccess=()=>res(rq.result);
-        rq.onerror=()=>rej(rq.error);
-        rq.onblocked=()=>rej(new Error('blocked'));
-        setTimeout(()=>rej(new Error('timeout')),8000);
+      db=await openDB(DBNAME, VER, (rq)=>{
+        const s=rq.result.createObjectStore(ST,{keyPath:'id'});
+        s.createIndex('keys','keys',{multiEntry:true});
+        rq.result.createObjectStore('meta');
       });
       mode='idb';
     }catch(e){
@@ -952,10 +1045,11 @@ const Store=(function(){
     // （読取とその場表示は続けられる）。第1回監査指摘・修正4。
     try{ degraded=null; await housekeeping(); }
     catch(e){ degraded='保存領域の整理（期限切れ削除）に失敗: '+(e&&e.name||e); }
+    try{ await cleanupOld(); }catch(e){}   // 旧DBの後片付けは失敗しても業務に影響しない
     return mode;
   }
 
-  const SCHEMA=3;        // 3 = 候補照合キー(cand)追加・交付日必須（2026-08-20監査対応）
+  const SCHEMA=4;        // 4 = 処方履歴（1件=1枚・90日分）。3 = キーごとに直近1回（v1.2.x）
   const KEEP_DAYS=90;    // 端末に処方情報を残す期間
   async function metaGet(k){
     if(mode==='idb') return await idbReq(db.transaction('meta','readonly').objectStore('meta').get(k));
@@ -969,16 +1063,83 @@ const Store=(function(){
     }
     const n=cloneMem(); n['meta_'+k]=v; commit(n);
   }
-  /** 起動時の整理: 鍵の作り方が変わった旧データの破棄と、90日を過ぎた保存の自動削除。
-   *  失敗は握りつぶさず呼び出し元（init）へ投げる（fail-closed）。 */
+  /** 起動時の整理: 旧形式からの移行、鍵の作り方が変わった旧データの破棄、
+   *  90日を過ぎた保存の自動削除。失敗は握りつぶさず呼び出し元（init）へ投げる（fail-closed）。 */
   async function housekeeping(){
     if(api._test.failHousekeeping) throw new Error('housekeeping test failure');
-    if(await metaGet('schema')!==SCHEMA){ await clear(); await metaSet('schema',SCHEMA); }
+    const schema=await metaGet('schema');
+    if(schema===undefined || schema===null){
+      // 新しいDBの初回: 旧形式（直近1回）のデータがあれば履歴の1件目として引き継ぐ
+      const old=await readOld();
+      if(old && old.recs.length) await replaceAll(old.recs, old.salt);
+      await metaSet('schema',SCHEMA);
+      await metaSet('migratedAt',Date.now());
+    }else if(schema!==SCHEMA){
+      await clear(); await metaSet('schema',SCHEMA);
+    }
     const now=Date.now();
     for(const r of await all()) if(purgeDue(r, now, KEEP_DAYS)) await delRec(r.id);
   }
 
-  /** バックアップ取込用の原子的な全置換。検証済みレコードのみ渡すこと。
+  /** 旧形式（v1.2.x・schema 3）の保存を読む。無ければ null。旧DBは作らない・変更しない */
+  async function readOld(){
+    if(mode==='idb'){
+      let odb=null, absent=false;
+      try{
+        odb=await openDB(OLD_DB, 1, (rq,e)=>{
+          // 旧DBが存在しない場合は作らない（バージョン変更を中断する）
+          if(!e || e.oldVersion===0){ absent=true; try{ rq.transaction.abort(); }catch(x){} }
+        });
+      }catch(e){
+        // 中断しても空の旧DB（ストアなし・バージョン0）が残る実装があるため片付けを依頼する。
+        // 元々無かったことは確認済み。完了を待つと実装によっては返ってこないので待たない
+        if(absent){ try{ indexedDB.deleteDatabase(OLD_DB); }catch(x){} }
+        return null;
+      }
+      // 引き継ぎは可能な範囲で行う。旧DBが想定外の形なら引き継がない（保存自体は止めない）
+      try{
+        const names=odb.objectStoreNames;
+        if(!names || !names.contains || !names.contains(OLD_ST) || !names.contains('meta')) return null;
+        const schema=await idbReq(odb.transaction('meta','readonly').objectStore('meta').get('schema'));
+        if(schema!==OLD_SCHEMA) return null;
+        const salt=await idbReq(odb.transaction('meta','readonly').objectStore('meta').get('salt'));
+        const recs=await idbReq(odb.transaction(OLD_ST,'readonly').objectStore(OLD_ST).getAll());
+        return {salt, recs:migrateRecs(recs)};
+      }catch(e){ return null; }
+      finally{ try{ odb.close(); }catch(e){} }
+    }
+    if(mode==='local'){
+      let o=null;
+      try{ o=JSON.parse(localStorage.getItem(OLD_LS)); }catch(e){ return null; }
+      if(!o || o.meta_schema!==OLD_SCHEMA) return null;
+      return {salt:o.salt, recs:migrateRecs(Object.values(o.recs||{}))};
+    }
+    return null;
+  }
+  function migrateRecs(recs){
+    return (recs||[]).filter(r=>r && r.id && Array.isArray(r.keys) && r.date && r.text)
+      .map(r=>({id:r.id, keys:r.keys, cand:r.cand||'', date:r.date, savedAt:r.savedAt, text:r.text}));
+  }
+  /** 旧形式のデータは移行から保存期間が過ぎたら消す（その時点で中身は全て期限切れ） */
+  async function cleanupOld(){
+    const at=await metaGet('migratedAt');
+    if(!at || Date.now()-at < KEEP_DAYS*86400000) return;
+    if(await metaGet('oldRemoved')) return;
+    if(mode==='idb'){
+      // 旧版を別タブで開いている等で削除が進まないことがある。起動を止めないよう3秒で諦め、次回に再試行する
+      const done=await new Promise(res=>{
+        let rq; try{ rq=indexedDB.deleteDatabase(OLD_DB); }catch(e){ return res(false); }
+        rq.onsuccess=()=>res(true); rq.onerror=rq.onblocked=()=>res(false);
+        setTimeout(()=>res(false), 3000);
+      });
+      if(!done) return;
+    }else if(mode==='local'){
+      try{ localStorage.removeItem(OLD_LS); }catch(e){}
+    }
+    await metaSet('oldRemoved',true);
+  }
+
+  /** 全置換（バックアップ取込・旧形式の移行）。検証済みレコードのみ渡すこと。
    *  IndexedDBでは1トランザクションで clear→全put→salt を行い、途中失敗時は
    *  何も反映されない（部分取込をしない。第1回監査指摘・修正3）。 */
   async function replaceAll(recs, salt){
@@ -1014,11 +1175,11 @@ const Store=(function(){
     if(mode==='idb'){
       const tx=db.transaction('meta','readwrite');
       let s=await idbReq(tx.objectStore('meta').get('salt'));
-      if(!s){ s=randomSalt(); tx.objectStore('meta').put(s,'salt'); }
+      if(!s){ s=randomHex(16); tx.objectStore('meta').put(s,'salt'); }
       await txDone(tx);
       return s;
     }
-    if(!mem.salt){ const n=cloneMem(); n.salt=randomSalt(); commit(n); }
+    if(!mem.salt){ const n=cloneMem(); n.salt=randomHex(16); commit(n); }
     return mem.salt;
   }
   // 書き出したデータを別端末で読み込む場合、鍵の作り方を揃えるため塩も引き継ぐ
@@ -1031,31 +1192,37 @@ const Store=(function(){
     }
     const n=cloneMem(); n.salt=s; commit(n);
   }
-  function randomSalt(){
-    const a=new Uint8Array(16);
+  function randomHex(bytes){
+    const a=new Uint8Array(bytes);
     (crypto&&crypto.getRandomValues) ? crypto.getRandomValues(a)
       : a.forEach((_,i)=>a[i]=Math.floor(Math.random()*256));
     return Array.from(a,b=>b.toString(16).padStart(2,'0')).join('');
   }
 
-  async function findByKeys(keys){
-    if(!keys.length) return null;
+  /** いずれかの照合キーを持つ履歴を全件返す（同一患者・医療機関・診療科の処方履歴） */
+  async function findAllByKeys(keys){
+    const out=new Map();
+    if(!keys.length) return [];
     if(mode==='idb'){
-      const idx=db.transaction(ST,'readonly').objectStore(ST).index('keys');
-      for(const k of keys){ const r=await idbReq(idx.get(k)); if(r) return r; }
-      return null;
+      for(const k of keys){
+        const rs=await idbReq(db.transaction(ST,'readonly').objectStore(ST).index('keys').getAll(k));
+        for(const r of rs||[]) out.set(r.id, r);
+      }
+    }else{
+      for(const id in mem.recs){ const r=mem.recs[id]; if((r.keys||[]).some(k=>keys.includes(k))) out.set(id, r); }
     }
-    for(const k of keys) for(const id in mem.recs) if((mem.recs[id].keys||[]).includes(k)) return mem.recs[id];
-    return null;
+    return [...out.values()];
   }
-  async function putRec(rec){
+  /** 複数件をまとめて書く（1トランザクション。途中で失敗したらどれも反映されない） */
+  async function putMany(recs){
     if(mode==='idb'){
       const tx=db.transaction(ST,'readwrite');
-      tx.objectStore(ST).put(rec);
+      for(const r of recs) tx.objectStore(ST).put(r);
       return txDone(tx);
     }
-    const n=cloneMem(); n.recs[rec.id]=rec; commit(n);
+    const n=cloneMem(); for(const r of recs) n.recs[r.id]=r; commit(n);
   }
+  async function putRec(rec){ return putMany([rec]); }
   async function delRec(id){
     if(mode==='idb'){
       const tx=db.transaction(ST,'readwrite');
@@ -1076,7 +1243,8 @@ const Store=(function(){
     }
     const n=cloneMem(); n.recs={}; commit(n);
   }
-  const api={init, ready, getSalt, setSalt, findByKeys, putRec, delRec, all, clear, replaceAll,
+  const api={init, ready, getSalt, setSalt, findAllByKeys, putMany, putRec, delRec, all, clear, replaceAll,
+          randomHex,
           get mode(){ return mode; },
           get degraded(){ return degraded; },
           KEEP_DAYS,
@@ -1084,31 +1252,31 @@ const Store=(function(){
   return api;
 })();
 
-/** 今読んだ処方を保存する（交付日が新しい方を残す。交付日不明は保存しない）。
- *  existing がある場合、照合キー（keys/cand）は常に統合して保持する
- *  —— カナ⇔漢字の手動確認後の統合（修正5）もこの経路で永続化される。 */
-async function saveCurrent(rx, keys, existing, cand){
+/** 今読んだ処方を履歴に1件追加する（交付日不明は保存しない）。
+ *  group は同一キーの既存履歴。照合キー（カナ・漢字・候補確認で統合した鍵）は
+ *  グループ内の全件で揃える —— どの鍵で引いても同じ履歴が全部見つかるようにするため。 */
+async function saveEntry(rx, keys, cand, group){
   if(!keys.length) return {saved:false, reason:'照合キーを作れないため保存できません。'};
   const date=issueDateKey(rx);
-  const merged=[...new Set([...keys, ...(existing?existing.keys||[]:[])])];
-  const mergedCand=(existing&&existing.cand)||cand||'';
-  if(chooseRecord(existing, date)==='keep'){
-    if(!existing) return {saved:false, reason:'交付日が読み取れないため保存しません（次回の新旧判定の基準にできないため）。'};
-    await Store.putRec(Object.assign({}, existing, {keys:merged, cand:mergedCand}));
-    return {saved:false, reason: date
-      ? '保存済みの処方の方が新しいため、保存は更新しませんでした。'
-      : '交付日が読み取れないため、保存は更新しませんでした（保存分は維持）。'};
-  }
-  await Store.putRec({id: existing?existing.id:keys[0], keys:merged, cand:mergedCand, date,
-                      savedAt:Date.now(), text:stripForStorage(rx.raw)});
-  return {saved:true, replaced:!!existing};
+  if(!date) return {saved:false, reason:'交付日が読み取れないため保存しません（履歴の日付の基準にできないため）。'};
+  const groupKeys=[...new Set([...keys, ...group.flatMap(r=>r.keys||[])])].slice(0,8);
+  const groupCand=cand || (group.find(r=>r.cand)||{}).cand || '';
+  const same=(a,b)=>a.length===b.length && a.every(k=>b.includes(k));
+  const updates=group.filter(r=>!same(r.keys||[], groupKeys))
+                     .map(r=>Object.assign({}, r, {keys:groupKeys}));
+  updates.push({id:Store.randomHex(32), keys:groupKeys, cand:groupCand, date,
+                savedAt:Date.now(), text:stripForStorage(rx.raw)});
+  await Store.putMany(updates);
+  return {saved:true};
 }
 
 /* ============================================================
    4. 画面描画
    ============================================================ */
 const state = {prev:null, curr:null};
-/** 表示モード: null / {mode:'first', noSave?} / {mode:'compare', storedSide:'prev'|'curr', demo?} */
+/** 表示モード: null / {mode:'first', noSave?, newerDate?, sameDay?}
+ *  / {mode:'compare', history:[{date,rx}], dateUnknown?, newerDate?, sameDay?, demo?}
+ *  / {mode:'already'} / {mode:'candidates'} */
 let compareMeta = null;
 
 /* ---------- 画面切替（読み取り画面 ⇄ 結果画面） ----------
@@ -1180,9 +1348,10 @@ function renderResult(){
     el.innerHTML = `<div class="card noprint"><p class="sub">処方せんを読み取ると、ここに結果が表示されます。</p></div>`;
     return;
   }
+  const cm=compareMeta||{};
 
   /* ---- すでに登録済み（同じ処方せんの再読取） ---- */
-  if((compareMeta||{}).mode==='already'){
+  if(cm.mode==='already'){
     const rx=state.curr;
     let h=`<div class="card"><h2>読取結果</h2>
       <div class="alert warn"><b>この処方せんはすでに登録済みです。</b>
@@ -1198,11 +1367,15 @@ function renderResult(){
   }
 
   /* ---- 初回（比較対象なし） ---- */
-  if(!state.prev && (compareMeta||{}).mode!=='candidates'){
-    const rx=state.curr, cm=compareMeta||{};
+  if(cm.mode!=='compare' && cm.mode!=='candidates'){
+    const rx=state.curr;
     let h=`<div class="card"><h2>読取結果</h2>`;
-    h+=`<div class="alert info"><b>初回（比較対象なし）</b> — ${esc(rxKeyText(rx))} の前回処方は保存されていません。`
+    h+=`<div class="alert info"><b>初回（比較対象なし）</b> — ${esc(rxKeyText(rx))} の`
+      +(cm.newerDate ? `この日より前の処方は保存されていません（${esc(mdText(cm.newerDate))} 交付の新しい記録はあります）。`
+                     : '過去の処方は保存されていません。')
       +(cm.noSave?'':'今回の内容を保存しました。次回の読取から自動で比較されます。')+`</div>`;
+    if(cm.sameDay)
+      h+=`<div class="alert info">同じ交付日の別の処方せんが登録されています（同日の別処方・訂正の可能性）。同日の処方どうしは比較しません。</div>`;
     h+=singleRxAlerts(rx).map(a=>`<div class="alert ${a.level}">${esc(a.text)}</div>`).join('');
     h+=`<div class="summary-lines" style="max-width:560px;margin-bottom:12px">${paneSummary(rx)}</div>`;
     h+=`<div class="rx-cols"><div><h3>処方内容</h3>${rx.rps.map(rpBlock).join('')}${remarksBlock(rx)}</div></div></div>`;
@@ -1213,18 +1386,18 @@ function renderResult(){
   }
 
   /* ---- 候補確認（氏名表記違い） ---- */
-  if((compareMeta||{}).mode==='candidates' && pendingScan){
+  if(cm.mode==='candidates' && pendingScan){
     const rx=state.curr;
     let h=`<div class="card"><h2>読取結果 — 確認が必要です</h2>
       <div class="alert warn"><b>氏名の表記が異なる保存分があります。</b>
       読み取った処方せん（${esc((rx.patient&&(rx.patient.氏名||rx.patient.カナ))||'—')}
       ／ ${esc(rxKeyText(rx))}）と、生年月日・性別・医療機関・診療科が一致します。
       カナ・漢字の表記違いで同一患者の可能性があります。自動では比較しません。</div>`;
-    pendingScan.candidates.forEach((rec,i)=>{
-      const s=parseJahis(rec.text);
+    pendingScan.candidates.forEach((g,i)=>{
+      const s=parseJahis(g.latest.text);
       const sd=parseJDate(s.交付年月日);
       h+=`<div class="rp"><div class="rp-head">
-        <span>保存分: ${esc(sd?sd.text:'交付日不明')}交付　${esc(s.rps.length)}剤 ${esc(s.drugs.length)}薬品</span>
+        <span>保存分: 最新 ${esc(sd?sd.text:'交付日不明')}交付（記録 ${g.entries.length} 件）　${esc(s.drugs.length)}薬品</span>
         <span><button class="primary" data-cand-idx="${i}">同一患者として比較</button></span>
         </div><div class="rp-body">${s.drugs.slice(0,6).map(d=>`<div class="rp-drug">${esc(d.名称||'（名称なし）')}　${esc(doseText(d))}</div>`).join('')}
         ${s.drugs.length>6?`<div class="meta">ほか ${s.drugs.length-6} 薬品</div>`:''}</div></div>`;
@@ -1237,34 +1410,36 @@ function renderResult(){
     return;
   }
 
-  /* ---- 比較 ---- */
-  const cm=compareMeta||{};
-  const r=compare(state.prev, state.curr);
+  /* ---- 比較（薬ごとに履歴をさかのぼる） ---- */
+  const currDate=issueDateKey(state.curr);
+  const r=compareHistory(state.curr, cm.history||[], currDate);
   lastCompare=r;                       // 件数タップの一覧表示用に保持
-  const pd=parseJDate(state.prev.交付年月日), cd=parseJDate(state.curr.交付年月日);
+  const cd=parseJDate(state.curr.交付年月日);
+  const dates=(cm.history||[]).map(x=>mdText(x.date));
 
   let h='';
-  // スクロールなしで件数が見えるよう、見出しは1行に圧縮し、件数を最上部に置く
+  // スクロールなしで件数が見えるよう、見出しは2行に圧縮し、件数を最上部に置く
   h+=`<div class="card">
-    <p class="sub" style="margin-bottom:8px"><b>${esc(rxKeyText(state.prev))}</b>　患者 ${esc((state.curr.patient&&(state.curr.patient.氏名||state.curr.patient.カナ))||'—')}<br>
-    前回 ${esc(pd?pd.text:(state.prev.交付年月日||'交付日不明'))}${cm.demo?'（デモ）':cm.storedSide==='prev'?'（保存から自動取得）':''}　→　今回 ${esc(cd?cd.text:(state.curr.交付年月日||'交付日不明'))}</p>`;
+    <p class="sub" style="margin-bottom:8px"><b>${esc(rxKeyText(state.curr))}</b>　患者 ${esc((state.curr.patient&&(state.curr.patient.氏名||state.curr.patient.カナ))||'—')}<br>
+    今回 ${esc(cd?cd.text:(state.curr.交付年月日||'交付日不明'))}　／　比較した履歴 ${dates.length}件（${esc(dates.join('・'))}）${cm.demo?'（デモ）':''}</p>`;
   h+=`<div class="counts">
-    <div class="count del" data-kind="del" role="button" tabindex="0"><div class="n">${r.counts.del}</div><div class="l">中止（前回のみ）</div></div>
-    <div class="count add" data-kind="add" role="button" tabindex="0"><div class="n">${r.counts.add}</div><div class="l">新規（今回のみ）</div></div>
+    <div class="count del" data-kind="del" role="button" tabindex="0"><div class="n">${r.counts.del}</div><div class="l">中止</div></div>
+    <div class="count add" data-kind="add" role="button" tabindex="0"><div class="n">${r.counts.add}</div><div class="l">新規</div></div>
     <div class="count chg" data-kind="chg" role="button" tabindex="0"><div class="n">${r.counts.chg}</div><div class="l">変更あり</div></div>
-    <div class="count same" data-kind="same" role="button" tabindex="0"><div class="n">${r.counts.same}</div><div class="l">継続（変更なし）</div></div>
+    <div class="count same" data-kind="same" role="button" tabindex="0"><div class="n">${r.counts.same}</div><div class="l">継続</div></div>
   </div>
   <p class="sub noprint" style="margin:-6px 0 12px">件数をタップすると薬品の一覧を表示します</p>`;
   if(cm.dateUnknown)
-    h+=`<div class="alert warn">交付日が読み取れないため、どちらが新しい処方か判定できません（保存分は維持しています）。表示上の前回・今回は仮の配置です。</div>`;
-  else if(cm.storedSide==='curr')
-    h+=`<div class="alert info">いま読み取った処方せんは保存分より古いため、「前回」側として表示しています。「今回」側は保存されていた最新の処方です（保存は変更していません）。</div>`;
-  if(state.prev.補足除外||state.curr.補足除外)
-    h+=`<div class="alert info">一包化・粉砕などの指示・備考は保存対象外のため比較していません。いま読み取った処方せんの指示は下の「処方内容」欄で確認できます。</div>`;
+    h+=`<div class="alert warn">交付日が読み取れないため、日付での振り分け・中止の判定が正確にできません。保存されている全ての記録と比べています（履歴には追加しません）。</div>`;
+  if(cm.newerDate)
+    h+=`<div class="alert info">この処方せんより新しい記録（${esc(mdText(cm.newerDate))} 交付）があります。この日より前の記録と比べています。</div>`;
+  if(cm.sameDay)
+    h+=`<div class="alert info">同じ交付日の別の処方せんが登録されています（同日の別処方・訂正の可能性）。同日の処方どうしは比較していません。</div>`;
+  h+=`<div class="alert info">一包化・粉砕などの指示・備考は保存対象外のため比較していません。いま読み取った処方せんの指示は下の「処方内容」欄で確認できます。</div>`;
   h+=r.alerts.map(a=>`<div class="alert ${a.level}">${esc(a.text)}</div>`).join('');
 
-  h+=`<table><thead><tr>
-    <th style="width:5.5em">区分</th><th>薬品</th><th style="width:24%">前回</th><th style="width:24%">今回</th><th style="width:27%">相違点</th>
+  h+=`<div class="tblwrap"><table><thead><tr>
+    <th style="width:5.5em">区分</th><th>薬品</th><th style="width:24%">前回（処方日）</th><th style="width:24%">今回</th><th style="width:27%">相違点</th>
   </tr></thead><tbody>`;
   for(const row of r.rows){
     const tag={add:'新規',del:'中止',chg:'変更',same:'継続'}[row.kind];
@@ -1274,30 +1449,36 @@ function renderResult(){
     else if(row.kind==='chg'&&row.spec) nameCell=`<span class="dname strike">${esc(row.prev.名称)}</span><br><span class="dname">${esc(row.curr.名称)}</span> <span class="tag note">規格変更の可能性</span>`;
     else nameCell=`<span class="dname">${esc(d.名称||'（名称なし）')}</span>`;
     const codeMeta = d.コード ? `<div class="meta">${esc(CODE.薬品コード種別[d.コード種別]||'種別'+d.コード種別)} ${esc(d.コード)}${d.名称補完?'（名称はコード表から補完）':''}</div>` : '';
-    const cellP = row.prev ? `${esc(drugCellText(row.prev))}<div class="meta">${esc(useText(row.prev.rp))}</div>` : '<span class="meta">—</span>';
+    const cellP = row.prev
+      ? `<b>${esc(mdText(row.lastDate))}</b>　${esc(drugCellText(row.prev))}<div class="meta">${esc(useText(row.prev.rp))}</div>`
+      : '<span class="meta">—</span>';
     const cellC = row.curr ? `${esc(drugCellText(row.curr))}<div class="meta">${esc(useText(row.curr.rp))}</div>` : '<span class="meta">—</span>';
     let chCell;
-    if(row.kind==='add') chCell='<span class="meta">今回から開始</span>';
-    else if(row.kind==='del') chCell='<span class="meta">今回は処方なし</span>';
+    if(row.kind==='add') chCell='<span class="meta">過去の記録になし（今回から開始）</span>';
+    else if(row.kind==='del') chCell=`<span class="meta">${esc(mdText(row.lastDate))} に処方・服用期間中のはずが今回は処方なし</span>`;
     else if(row.changes.length) chCell=`<ul class="chg-list">`+row.changes.map(c=>
         `<li><span class="k">${esc(c.k)}</span>${esc(c.a)}<span class="arrow">→</span><b>${esc(c.b)}</b>${c.note?`<div class="meta">${esc(c.note)}</div>`:''}</li>`).join('')+`</ul>`;
     else chCell='<span class="meta">相違なし</span>';
+    if(row.gapNote) chCell+=`<div class="meta" style="color:var(--chg)">${esc(row.gapNote)}</div>`;
     h+=`<tr class="r-${row.kind}">
       <td><span class="tag ${row.kind}">${tag}</span></td>
       <td>${nameCell}${codeMeta}</td><td>${cellP}</td><td>${cellC}</td><td>${chCell}</td></tr>`;
   }
-  h+=`</tbody></table>
-  <p class="footnote">突合は「薬品コード（種別＋コード）→ 薬品名称 → 含量を除いた基準名」の順に照合します。
-  一般名処方と銘柄処方の対応づけや、同一成分・別銘柄の判定は薬品マスタを持たないため行いません（中止＋新規として表示されます）。</p>
+  h+=`</tbody></table></div>
+  <p class="footnote">今回の各薬について、同じ医療機関・診療科の過去${Store.KEEP_DAYS}日の記録から「その薬が最後に出た処方」を探して比べています。
+  照合は「薬品コード → 薬品名称 → 含量を除いた基準名」の順です。
+  中止は、内服薬なら最終処方日から日数（＋来局の遅れの猶予）の間にあるのに今回出ていないもの、頓服・外用などは直前の処方に入っていて今回ないものです。
+  一般名処方と銘柄処方の対応づけや、同一成分・別銘柄の判定は行いません（中止＋新規として表示されます）。</p>
   </div>`;
 
+  const prevDate=(cm.history&&cm.history[0])?mdText(cm.history[0].date):'';
   h+=`<div class="card"><h2>処方内容</h2><div class="rx-cols">
-    <div><h3>前回処方</h3>${state.prev.rps.map(rpBlock).join('')}${remarksBlock(state.prev)}</div>
+    <div><h3>直前の処方（${esc(prevDate)}）</h3>${state.prev.rps.map(rpBlock).join('')}${remarksBlock(state.prev)}</div>
     <div><h3>今回処方</h3>${state.curr.rps.map(rpBlock).join('')}${remarksBlock(state.curr)}</div>
   </div></div>`;
 
   h+=`<div class="card noprint"><h2>読取データ（検証用）</h2>
-    <details><summary>前回処方の生データ（${state.prev.records.length} レコード）</summary><pre>${esc(state.prev.raw)}</pre></details>
+    <details><summary>直前の処方の生データ（${state.prev.records.length} レコード）</summary><pre>${esc(state.prev.raw)}</pre></details>
     <details><summary>今回処方の生データ（${state.curr.records.length} レコード）</summary><pre>${esc(state.curr.raw)}</pre></details>
   </div>`;
   el.innerHTML=h;
@@ -1388,15 +1569,15 @@ function finalize(t, bytes, parityBad){
 }
 
 /* 読み取った処方せんの処理:
-   同一キー（患者×医療機関×診療科）の保存分を探し、
-   無ければ「初回」として保存、有れば交付日で新旧を判定して比較する。
+   同一キー（患者×医療機関×診療科）の処方履歴を探し、
+   無ければ「初回」として保存、有れば今回より前の履歴と薬ごとに突合して履歴に追加する。
    氏名キー不一致でも生年月日+性別+機関+診療科が一致する保存分があれば、
    自動比較はせず候補として提示する（修正5）。 */
-let pendingScan=null;   // 候補確認待ち: {rx, keys, cand, candidates:[rec]}
+let pendingScan=null;   // 候補確認待ち: {rx, keys, cand, candidates:[{entries, latest}]}
 async function processScanned(rx){
   pendingScan=null;
   showView('result');   // 読取成立＝結果画面へ（パース失敗時はここに来ない）
-  let keys=[], cand='', found=null, candidates=[], storeOK=true;
+  let keys=[], cand='', group=[], candidates=[], storeOK=true;
   try{
     await Store.ready();                       // 初期化完了前は保存・自動比較を許可しない
     if(Store.degraded) throw new Error(Store.degraded);
@@ -1404,13 +1585,11 @@ async function processScanned(rx){
     keys=recordKeys(rx, salt);
     cand=candidateKey(rx, salt);
     if(keys.length){
-      found=await Store.findByKeys(keys);
-      if(!found && cand)
-        candidates=(await Store.all()).filter(r=>r.cand===cand);
+      group=await Store.findAllByKeys(keys);
+      if(!group.length && cand)
+        candidates=groupByPatient((await Store.all()).filter(r=>r.cand===cand));
     }
   }catch(e){ storeOK=false; }
-
-  const scannedDate=issueDateKey(rx);
 
   /* 保存・比較の対象外（fail-closed含む）の理由を特定して表示 */
   if(!storeOK || !keys.length){
@@ -1430,7 +1609,7 @@ async function processScanned(rx){
   }
 
   /* 氏名表記違いの候補がある場合は自動判定せず提示（修正5） */
-  if(!found && candidates.length){
+  if(!group.length && candidates.length){
     pendingScan={rx, keys, cand, candidates};
     state.prev=null; state.curr=rx;
     compareMeta={mode:'candidates'};
@@ -1440,11 +1619,12 @@ async function processScanned(rx){
     return;
   }
 
-  // 保存済みとまったく同じ処方せん（同じ紙をもう一度読んだ）は取り込まない。
-  // 取り込むと自分自身と比較して「全て継続」になり、意味のない結果が出るため。
+  // 履歴とまったく同じ処方せん（同じ紙をもう一度読んだ）は取り込まない。
+  // 取り込むと同じ処方が履歴に二重に入り、意味のない結果が出るため。
   // 判定は保存形式に揃えた内容の完全一致で行う（同一キー・同一交付日でも
-  // 内容が違えば別の処方せん＝訂正・差し替えの可能性があるので通常どおり処理する）。
-  if(found && stripForStorage(rx.raw)===found.text){
+  // 内容が違えば別の処方せん＝同日の別処方・訂正の可能性があるので通常どおり処理する）。
+  const stripped=stripForStorage(rx.raw);
+  if(group.some(r=>r.text===stripped)){
     state.prev=null; state.curr=rx;
     compareMeta={mode:'already'};
     renderResult();
@@ -1454,52 +1634,66 @@ async function processScanned(rx){
     return;
   }
 
-  const d=decideScan(found, scannedDate);   // 新旧・初回の判定はこの純関数が唯一の定義
-
-  if(d.mode==='first'){
-    state.prev=null; state.curr=rx;
-    compareMeta={mode:'first', noSave:!!d.noDate};
-    renderResult();
-    if(d.noDate){
-      msg('scan','交付日が読み取れないため保存しません（次回の新旧判定の基準にできないため）。内容表示のみ行います。','warn');
-    }else{
-      try{ await saveCurrent(rx, keys, null, cand); msg('scan','初回として保存しました。次回の読取から自動で比較されます。','ok'); }
-      catch(e){ msg('scan','保存できませんでした（'+(e.name||e)+'）。','err'); }
-    }
-  }else{
-    await showComparison(rx, keys, cand, found, d);
-  }
+  await showHistory(rx, keys, cand, group);
   renderStoreInfo();
 }
 
-/** 保存分との比較表示＋保存更新（通常経路・候補確認後の経路の共通部） */
-async function showComparison(rx, keys, cand, rec, d){
-  const stored=parseJahis(rec.text);
-  stored.補足除外=true;   // 保存分は自由記述（備考・補足）を持たないため、指示の比較は行わない
-  if(d.scannedRole==='curr'){ state.prev=stored; state.curr=rx; compareMeta={mode:'compare', storedSide:'prev', dateUnknown:!!d.dateUnknown}; }
-  else                      { state.prev=rx; state.curr=stored; compareMeta={mode:'compare', storedSide:'curr', dateUnknown:!!d.dateUnknown}; }
+/** 同じ照合キーを持つ履歴を患者ごとにまとめる（候補提示用）。新しい処方を代表に使う */
+function groupByPatient(recs){
+  const groups=new Map();
+  for(const r of recs){
+    const g=[...(r.keys||[])].sort().join('|');
+    if(!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(r);
+  }
+  return [...groups.values()].map(entries=>{
+    entries.sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:0);
+    return {entries, latest:entries[0]};
+  });
+}
+
+/** 履歴との突合表示＋履歴への追加（通常経路・候補確認後の経路の共通部） */
+async function showHistory(rx, keys, cand, group){
+  const scannedDate=issueDateKey(rx);
+  const sp=splitHistory(group, scannedDate);
+  const history=sp.before
+    .map(r=>({date:r.date, rx:parseJahis(r.text)}))
+    .sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:0);
+  const info={dateUnknown:sp.dateUnknown, sameDay:sp.sameDay.length,
+              newerDate: sp.newer.length ? sp.newer.map(r=>r.date).sort().pop() : ''};
+  state.curr=rx;
+  if(!history.length){
+    state.prev=null;
+    compareMeta=Object.assign({mode:'first', noSave:!scannedDate}, info);
+  }else{
+    state.prev=history[0].rx;   // 直前の処方（処方内容欄の表示用）
+    compareMeta=Object.assign({mode:'compare', history}, info);
+  }
   renderResult();
+  if(!scannedDate){
+    msg('scan','交付日が読み取れないため履歴には追加しません（日付で並べられないため）。比較の表示のみ行います。','warn');
+    return;
+  }
   try{
-    await saveCurrent(rx, keys, rec, cand);   // 置き換え判定も同じ純関数系（chooseRecord→scannedIsCurrent）
-    msg('scan', d.dateUnknown
-      ? '交付日が読み取れないため新旧を判定できません。保存分は維持しました。'
-      : d.replaceStored
-      ? '前回処方と比較しました。今回分を保存しました。'
-      : '読み取った処方せんは保存分より古いため、「前回」側として比較しました（保存は最新のまま）。', d.dateUnknown?'warn':'ok');
+    await saveEntry(rx, keys, cand, group);
+    msg('scan', history.length
+      ? '過去の処方と薬ごとに比較しました。今回分を履歴に追加しました。'
+      : (info.newerDate
+          ? 'この日より前の記録がないため比較対象はありません。履歴に追加しました。'
+          : '初回として保存しました。次回の読取から自動で比較されます。'), 'ok');
   }catch(e){
-    msg('scan','比較は表示しましたが、保存を更新できませんでした（'+(e.name||e)+'）。','err');
+    msg('scan','比較は表示しましたが、履歴に追加できませんでした（'+(e.name||e)+'）。','err');
   }
 }
 
 /** 候補確認: 同一患者として選択（修正5）。キーを統合し、以後は自動照合される */
-async function confirmCandidate(recId){
+async function confirmCandidate(idx){
   if(!pendingScan) return;
   const {rx, keys, cand, candidates}=pendingScan;
-  const rec=candidates.find(r=>r.id===recId);
-  if(!rec) return;
+  const g=candidates[idx];
+  if(!g) return;
   pendingScan=null;
-  const scannedDate=issueDateKey(rx);
-  await showComparison(rx, keys, cand, rec, decideScan(rec, scannedDate));
+  await showHistory(rx, keys, cand, g.entries);
   renderStoreInfo();
 }
 /** 候補確認: 別人として初回扱いで保存 */
@@ -1514,7 +1708,7 @@ async function rejectCandidates(){
   if(!scannedDate){
     msg('scan','別人として扱います。交付日が読み取れないため保存はしません。','warn');
   }else{
-    try{ await saveCurrent(rx, keys, null, cand); msg('scan','別人として初回保存しました。','ok'); }
+    try{ await saveEntry(rx, keys, cand, []); msg('scan','別人として初回保存しました。','ok'); }
     catch(e){ msg('scan','保存できませんでした（'+(e.name||e)+'）。','err'); }
   }
   renderStoreInfo();
@@ -1531,12 +1725,12 @@ async function renderStoreInfo(){
     if(typeof DRUG_MASTER_INFO!=='undefined' && DRUG_MASTER_INFO && DRUG_MASTER_INFO.source)
       mi='　／　コード表: '+DRUG_MASTER_INFO.source.csvName.replace(/^y_|\.csv$/g,'')+'版（'+DRUG_MASTER_INFO.receiptCount+'件）';
   }catch(e){}
-  el.innerHTML=`保存済み <b>${n}</b> 件（患者×医療機関×診療科ごとに直近1回・${Store.KEEP_DAYS}日で自動削除）　／　保存先：${esc(label)}${esc(mi)}`
+  el.innerHTML=`保存済み <b>${n}</b> 件（患者×医療機関×診療科ごとの処方履歴・${Store.KEEP_DAYS}日で自動削除）　／　保存先：${esc(label)}${esc(mi)}`
     + (Store.mode==='memory' ? '　<span class="src">この開き方では保存が使えません</span>' : '')
     + (Store.degraded ? `　<span class="tag del">保存・自動比較を停止中（${esc(Store.degraded)}）</span>` : '');
 }
 async function clearStore(){
-  if(!confirm('保存されている前回処方をすべて消去します。よろしいですか？')) return;
+  if(!confirm('保存されている処方の履歴をすべて消去します。よろしいですか？')) return;
   await Store.clear(); renderStoreInfo();
   msg('scan','保存を全消去しました。','ok');
 }
@@ -1546,7 +1740,7 @@ async function clearStore(){
 async function exportData(){
   try{ await Store.ready(); }catch(e){ msg('scan','保存領域の初期化が完了していないため、書き出しできません。','err'); return; }
   const recs=await Store.all(), salt=await Store.getSalt();
-  const json=JSON.stringify({format:'shohousen-kansa/1', salt, records:recs});
+  const json=JSON.stringify({format:'quickcheck/2', salt, records:recs});
   document.getElementById('bakTitle').textContent='保存データの書き出し（要保護データ）';
   document.getElementById('bakHint').textContent=
     `保存 ${recs.length} 件分です。処方内容と照合用の鍵・塩を含む「要保護データ」です。`+
@@ -1566,11 +1760,12 @@ async function exportData(){
 const HEX64=/^[0-9a-f]{64}$/, HEX32=/^[0-9a-f]{32}$/;
 function validateBackup(data, now){
   now = now===undefined ? Date.now() : now;
-  if(!data || data.format!=='shohousen-kansa/1') return {ok:false, error:'書き出しデータの形式ではありません'};
+  if(!data || (data.format!=='quickcheck/2' && data.format!=='shohousen-kansa/1'))
+    return {ok:false, error:'書き出しデータの形式ではありません'};
   if(typeof data.salt!=='string' || !HEX32.test(data.salt)) return {ok:false, error:'塩(salt)が不正です'};
   if(!Array.isArray(data.records)) return {ok:false, error:'records がありません'};
   if(data.records.length>100000) return {ok:false, error:'件数が多すぎます'};
-  const ids=new Set(), allKeys=new Set(), out=[];
+  const ids=new Set(), keyGroup=new Map(), out=[];
   let skippedExpired=0;
   for(let i=0;i<data.records.length;i++){
     const r=data.records[i], at=(i+1)+'件目';
@@ -1582,9 +1777,13 @@ function validateBackup(data, now){
     if(!Array.isArray(r.keys) || !r.keys.length || r.keys.length>8 ||
        !r.keys.every(k=>typeof k==='string'&&HEX64.test(k)))
       return {ok:false, error:at+': 照合キーが不正です'};
+    // 同じ照合キーを持つ記録は同一患者の履歴。鍵の組み合わせが食い違う記録が混ざると
+    // 別の患者の履歴が連結されうるため拒否する（旧形式は1キー1件なので必ず通る）
+    const sig=[...r.keys].sort().join('|');
     for(const k of r.keys){
-      if(allKeys.has(k)) return {ok:false, error:at+': 照合キーが他のレコードと重複しています（誤比較の原因になるため拒否）'};
-      allKeys.add(k);
+      if(keyGroup.has(k) && keyGroup.get(k)!==sig)
+        return {ok:false, error:at+': 照合キーの組み合わせが他の記録と食い違っています（誤比較の原因になるため拒否）'};
+      keyGroup.set(k, sig);
     }
     if(typeof r.date!=='string' || strictDateKey(r.date)!==r.date)
       return {ok:false, error:at+': 交付日が実在する日付ではありません'};
@@ -1981,10 +2180,18 @@ const DEMO_CURR=[
 '101,3,3,,1','111,3,1,,１日２回両膝に貼付,2',
 '201,3,1,1,2,662620001,ロキソプロフェンＮａテープ１００ｍｇ,7,1,枚'
 ].join('\r\n');
+/* 2/13 定期 → 2/27 臨時（抗菌薬5日分） → 3/13 定期、という間に臨時が挟まる例 */
+const DEMO_TEMP=[
+'JAHIS10','1,1,1234567,13,○○内科クリニック','4,1,,内科','11,,日薬 太郎,ﾆﾁﾔｸ ﾀﾛｳ','12,1','13,19600606',
+'51,20260227',
+'101,1,1,,5','111,1,1,,１日２回朝夕食後,2',
+'201,1,1,1,2,620008888,クラリスロマイシン錠２００ｍｇ「サワイ」,2,1,錠'
+].join('\r\n');
 function loadDemo(){
   clearAll();
-  state.prev=parseJahis(DEMO_PREV); state.curr=parseJahis(DEMO_CURR);
-  compareMeta={mode:'compare', storedSide:'prev', demo:true};
+  const history=[{date:'20260227', rx:parseJahis(DEMO_TEMP)}, {date:'20260213', rx:parseJahis(DEMO_PREV)}];
+  state.prev=history[0].rx; state.curr=parseJahis(DEMO_CURR);
+  compareMeta={mode:'compare', history, demo:true};
   renderResult();
   showView('result');
   msg('scan','デモデータを表示しています（保存はしていません）。','ok');
@@ -1999,7 +2206,7 @@ let lastCompare=null;
 function showKindList(kind){
   if(!lastCompare) return;
   const rows=lastCompare.rows.filter(x=>x.kind===kind);
-  const title={del:'中止（前回のみ）', add:'新規（今回のみ）', chg:'変更あり', same:'継続（変更なし）'}[kind]||'';
+  const title={del:'中止', add:'新規', chg:'変更あり', same:'継続'}[kind]||'';
   let h;
   if(!rows.length){
     h='<p class="sub">該当する薬品はありません。</p>';
@@ -2012,13 +2219,14 @@ function showKindList(kind){
         ? '<ul class="chg-list">'+row.changes.map(c=>
             `<li><span class="k">${esc(c.k)}</span>${esc(c.a)}<span class="arrow">→</span><b>${esc(c.b)}</b></li>`).join('')+'</ul>'
         : '<div class="meta">名称のみの相違です</div>';
-      return `<div class="rp"><div class="rp-body"><div class="rp-drug"><span class="dname">${nameHtml}</span></div>${ch}</div></div>`;
+      return `<div class="rp"><div class="rp-body"><div class="rp-drug"><span class="dname">${nameHtml}</span>　<span class="meta">前回 ${esc(mdText(row.lastDate))}</span></div>${ch}</div></div>`;
     }).join('');
   }else{
     h='<div class="rp"><div class="rp-body">'
       +rows.map(row=>{
         const d=row.curr||row.prev;
-        return `<div class="rp-drug"><span class="dname">${esc(d.名称||'（名称なし）')}</span></div>`;
+        const when=row.lastDate?`　<span class="meta">前回 ${esc(mdText(row.lastDate))}</span>`:'';
+        return `<div class="rp-drug"><span class="dname">${esc(d.名称||'（名称なし）')}</span>${when}</div>`;
       }).join('')
       +'</div></div>';
   }
@@ -2037,8 +2245,7 @@ document.getElementById('result').addEventListener('click', e=>{
   const t=e.target && e.target.closest ? e.target.closest('button[data-cand-idx],button[data-cand-reject]') : null;
   if(!t || !pendingScan) return;
   if(t.hasAttribute('data-cand-reject')){ rejectCandidates(); return; }
-  const rec=pendingScan.candidates[+t.getAttribute('data-cand-idx')];
-  if(rec) confirmCandidate(rec.id);
+  confirmCandidate(+t.getAttribute('data-cand-idx'));
 });
 
 // 端末・開き方に応じて、使える読取方法を案内する

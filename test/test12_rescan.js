@@ -119,9 +119,9 @@ const sym=(idx,total,parity,bytes)=>({binaryData:bytes||[74,65,72,73,83,49,48],
     // 同じ交付日でも内容が違えば通常どおり取り込む（訂正・差し替えの処方せん）
     await api.processScanned(api.parseJahis(RX('20260313',
       '201,1,1,1,2,612170710,ノルバスク錠５ｍｇ,1,1,錠')));
-    ok(api.getMeta().mode==='compare',
-       '3-8. 同じ交付日でも内容が違えば取り込んで比較する（訂正処方せん）');
-    ok((await api.Store.all())[0].text!==before[0].text, '3-9. 保存が新しい内容に更新される');
+    ok(api.getMeta().mode==='first' && api.getMeta().sameDay===1,
+       '3-8. 同じ交付日でも内容が違えば取り込む（同日の処方どうしは比較せず、その旨を表示）');
+    ok((await api.Store.all()).length===2, '3-9. 同日の別処方として履歴に追加される（上書きしない）');
 
     // 別の日の処方せんは通常どおり比較
     await api.processScanned(api.parseJahis(RX('20260413')));
