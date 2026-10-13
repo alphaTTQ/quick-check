@@ -105,10 +105,11 @@ const sym=(idx,total,parity,bytes)=>({binaryData:bytes||[74,65,72,73,83,49,48],
     // まったく同じ処方せんをもう一度読む
     flashes.length=0;
     await api.processScanned(api.parseJahis(RX('20260313')));
-    ok(api.getMeta().mode==='already', '3-2. 「すでに登録済み」と判定される');
+    ok(api.getMeta().review && api.getMeta().review.already===true, '3-2. 「すでに登録済み」と判定される');
     ok(doc.getElementById('msg-scan').textContent.includes('すでに登録済み'),
        '3-3. 「すでに登録済みです」とメッセージが出る');
-    ok(doc.getElementById('result').innerHTML.includes('取り込みませんでした'),
+    ok(doc.getElementById('result').innerHTML.includes('すでに登録済み') &&
+       doc.getElementById('result').innerHTML.includes('取り込みはせず'),
        '3-4. 取り込まなかったことを画面に明示');
     ok(flashes.length===0, '3-5. 登録済みの再読取では画面が光らない');
     const after=await api.Store.all();
@@ -126,6 +127,14 @@ const sym=(idx,total,parity,bytes)=>({binaryData:bytes||[74,65,72,73,83,49,48],
     // 別の日の処方せんは通常どおり比較
     await api.processScanned(api.parseJahis(RX('20260413')));
     ok(api.getMeta().mode==='compare', '3-10. 別の交付日は通常どおり比較される');
+
+    // 比較のあった処方せんを読み直すと、保存は変えずに当時の監査結果を再表示する
+    const n=(await api.Store.all()).length;
+    await api.processScanned(api.parseJahis(RX('20260413')));
+    const m=api.getMeta();
+    ok(m.review && m.review.already && m.mode==='compare' && m.history.length===2,
+       '3-11. 登録済みの再読取で、その日より前の履歴との監査結果を表示（自分自身は除く）');
+    ok((await api.Store.all()).length===n, '3-12. 再表示しても保存件数は変わらない');
   }
 
   process.exit(fail?1:0);
