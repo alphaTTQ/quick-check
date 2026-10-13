@@ -162,6 +162,11 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
 .hit{display:block;width:100%;text-align:left;margin:0 0 6px;padding:8px 11px;font-size:13.5px;line-height:1.5}
 .hit .d{font-weight:700;margin-right:8px}
 .hit .who{color:var(--info);font-weight:600;margin-left:6px}
+.timeline{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:-2px 0 10px}
+.timeline .meta{margin-right:2px}
+.tl{font-size:13px;font-weight:600;padding:3px 10px;border-radius:6px;min-height:0}
+.tl.cur{background:#1c5fa8;color:#fff;border:1px solid #1c5fa8}
+@media (pointer:coarse){ .tl{padding:7px 12px;min-height:36px;font-size:14px} }
 .src{font-size:11.5px;font-weight:700;border-radius:4px;padding:1px 7px;background:var(--info-bg);color:var(--info);border:1px solid var(--info-line)}
 
 /* タッチ端末（スマホ・タブレット）— 指で確実に押せる大きさにする */
@@ -206,7 +211,7 @@ textarea{width:100%;min-height:220px;font-family:Consolas,"Courier New",monospac
   </div>
 </header>
 
-<div id="verbadge" class="noprint">Ver 1.2</div>
+<div id="verbadge" class="noprint">Ver 1.3</div>
 
 <!-- ============ 画面1: 読み取り画面 ============ -->
 <section id="view-scan">
@@ -11480,12 +11485,21 @@ window.addEventListener('popstate', ()=>{
   showView((typeof location!=='undefined' && location.hash==='#result')?'result':'scan', true);
 });
 
+/** 医療機関の表示名。QRに名称を入れない医療機関があるため、その場合は
+ *  医療機関コードと処方医名で見分けられるようにする（どちらも保存対象の項目） */
+function hospText(rx){
+  const h=rx.hosp||{};
+  if(h.名称) return h.名称;
+  const doc=doctorName(rx);
+  if(!h.コード) return '医療機関名不明'+(doc?'（医師 '+doc+'）':'');
+  return '医療機関コード '+h.コード+(doc?'（医師 '+doc+'）':'');
+}
+function doctorName(rx){ const d=rx.doctor||{}; return d.漢字||d.カナ||''; }
 /** 比較キーの表示名（医療機関＋診療科） */
 function rxKeyText(rx){
-  const hosp=(rx.hosp&&rx.hosp.名称)||'医療機関名不明';
   const d=rx.dept||{};
   const dept=d.名称||(d.コード?('診療科コード'+d.コード):'');
-  return hosp+(dept?'　'+dept:'　（診療科記載なし）');
+  return hospText(rx)+(dept?'　'+dept:'　（診療科記載なし）');
 }
 
 function paneSummary(rx){
@@ -11500,7 +11514,7 @@ function paneSummary(rx){
     rows.push(['患者', '保存対象外（氏名・生年月日は保存していません）']);
   }
   rows.push(['交付日', d?d.text:(rx.交付年月日||'—')]);
-  rows.push(['医療機関', (rx.hosp&&rx.hosp.名称)||'—']);
+  rows.push(['医療機関', rx.hosp ? hospText(rx) : '—']);
   rows.push(['処方', `${rx.rps.length} 剤 / ${rx.drugs.length} 薬品`]);
   return rows.map(r=>`<div><span class="k">${r[0]}</span><span class="v">${esc(r[1])}</span></div>`).join('');
 }
@@ -11534,7 +11548,8 @@ function renderResult(){
     h+=`<div class="alert info"><b>${cm.review?'比較対象なし':'初回（比較対象なし）'}</b> — ${esc(rxKeyText(rx))} の`
       +(cm.newerDate ? `この日より前の処方は保存されていません（${esc(mdText(cm.newerDate))} 交付の新しい記録はあります）。`
                      : '過去の処方は保存されていません。')
-      +(cm.noSave?'':'今回の内容を保存しました。次回の読取から自動で比較されます。')+`</div>`;
+      +(cm.noSave?'':'今回の内容を保存しました。次回の読取から自動で比較されます。')
+      +(cm.review && (cm.review.timeline||[]).length<=1 ? 'この患者（同じ医療機関・診療科）の保存記録はこの1件だけです。' : '')+`</div>`;
     if(cm.sameDay)
       h+=`<div class="alert info">同じ交付日の別の処方せんが登録されています（同日の別処方・訂正の可能性）。同日の処方どうしは比較しません。</div>`;
     h+=singleRxAlerts(rx).map(a=>`<div class="alert ${a.level}">${esc(a.text)}</div>`).join('');
@@ -11900,10 +11915,12 @@ async function reviewRecord(rec, liveRx, fromSearch){
   }catch(e){}
   const sp=splitHistory(group.filter(r=>r.id!==rec.id), rec.date);
   const history=sp.before.map(r=>({date:r.date, rx:parseJahis(r.text)})).sort(byDateDesc);
+  // 同じ患者×医療機関×診療科の記録を古い順に並べ、前後の処方へ移れるようにする
+  const timeline=group.slice().sort((a,b)=>-byDateDesc(a,b) || ((a.savedAt||0)-(b.savedAt||0)));
   const info={sameDay:sp.sameDay.length,
               newerDate: sp.newer.length ? sp.newer.map(r=>r.date).sort().pop() : '',
               review:{date:rec.date, savedAt:rec.savedAt, already:!!liveRx, fromSearch:!!fromSearch,
-                      name:sessionNames.get(rec.id)||''}};
+                      name:sessionNames.get(rec.id)||'', timeline, pos:timeline.findIndex(r=>r.id===rec.id)}};
   pendingScan=null;
   state.curr=liveRx||parseJahis(rec.text);
   if(history.length){
@@ -11949,7 +11966,8 @@ function buildSearchIndex(recs){
   return recs.map(r=>{
     const rx=parseJahis(r.text);
     const name=sessionNames.get(r.id)||'';
-    const hay=searchNorm([rxKeyText(rx), ...rx.drugs.map(d=>d.名称||''), name].join(' '));
+    const hay=searchNorm([rxKeyText(rx), (rx.hosp&&rx.hosp.コード)||'', doctorName(rx),
+                          ...rx.drugs.map(d=>d.名称||''), name].join(' '));
     return {rec:r, rx, name, hay};
   }).sort((a,b)=>byDateDesc(a.rec,b.rec) || ((b.rec.savedAt||0)-(a.rec.savedAt||0)));
 }
@@ -11995,9 +12013,20 @@ function reviewBanner(cm){
   const k=rv.date||'';
   const dt=k ? `${+k.slice(0,4)}/${+k.slice(4,6)}/${+k.slice(6,8)}` : '交付日不明';
   const back=rv.fromSearch ? `<button class="ghost noprint" data-search-back="1" style="float:right;margin:-6px -6px 0 6px">検索に戻る</button>` : '';
-  return rv.already
+  const head = rv.already
     ? `<div class="alert warn"><b>この処方せんはすでに登録済みです。</b>取り込みはせず、保存済みの監査結果を表示しています。</div>`
     : `<div class="alert info">${back}<b>保存済みの記録を再表示</b>　${esc(dt)} 交付分（保存は変更していません）</div>`;
+  return head+timelineBar(rv);
+}
+/** この患者（同じ医療機関・診療科）の記録日付。タップでその処方の監査結果へ移る。
+ *  記録idはHTMLに埋めず、review.timeline の添字で対応付ける */
+function timelineBar(rv){
+  const tl=rv.timeline||[];
+  if(tl.length<2) return '';
+  return `<div class="timeline noprint"><span class="meta">この患者の記録（${tl.length}件）</span>`
+    +tl.map((r,i)=>i===rv.pos
+      ? `<span class="tl cur">${esc(mdText(r.date))}</span>`
+      : `<button class="tl" data-tl-idx="${i}">${esc(mdText(r.date))}</button>`).join('')+`</div>`;
 }
 /** 再表示の注意書き（結果の下に置き、件数がスクロールなしで見える位置を保つ） */
 function reviewNote(cm){
@@ -12534,6 +12563,12 @@ document.getElementById('result').addEventListener('click', e=>{
 document.getElementById('result').addEventListener('click', e=>{
   const b=e.target && e.target.closest ? e.target.closest('button[data-search-back]') : null;
   if(b) openSearch();
+  const t=e.target && e.target.closest ? e.target.closest('button[data-tl-idx]') : null;
+  const rv=compareMeta && compareMeta.review;
+  if(t && rv && rv.timeline){
+    const rec=rv.timeline[+t.getAttribute('data-tl-idx')];
+    if(rec) reviewRecord(rec, null, rv.fromSearch);
+  }
 });
 
 // 候補確認ボタンの委譲リスナー（インラインonclickは使わない。第2回監査指摘2:

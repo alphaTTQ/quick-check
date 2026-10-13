@@ -155,5 +155,42 @@ function RX(head, date, days, drugs){
     ok((await api3.search('4月')).every(e=>e.rec.date.slice(4,6)==='04'), 'S5-2. 「4月」で月を絞れる');
   }
 
+  /* ===== S6. QRに医療機関名・診療科が無い医療機関（実機で確認された形式）と、患者の記録の行き来 ===== */
+  {
+    const api6=makeApp(); await api6.Store.init();
+    const HEAD_N=['JAHIS11','1,,9999999,13,','5,,,架空 一郎','11,,薬師 次郎,ﾔｸｼ ｼﾞﾛｳ','12,1','13,19500101'];
+    const RXN=(date,drugs)=>[...HEAD_N,'51,'+date,'101,1,1,,14','111,1,1,,（分１，朝食後服用）,',
+      ...drugs.map((d,i)=>`201,1,${i+1},,7,${d[0]},${d[1]},1,1,錠`)].join('\r\n');
+    const FURO=['2139005F3ZZZ','【般】フロセミド錠　　１０ｍｇ'], LANSO=['2329023F1ZZZ','【般】ランソプラゾール口腔内崩壊錠　　１５ｍｇ'];
+    await api6.processScanned(api6.parseJahis(RXN('20261009',[FURO,LANSO])));
+    await api6.processScanned(api6.parseJahis(RXN('20261023',[FURO])));
+    ok(api6.getMeta().mode==='compare' && api6.getLast().counts.del===1, 'S6-1. 医療機関名が無くても医療機関コードで照合して比較できる');
+    let h=await api6.search('');
+    const body=api6.doc.getElementById('searchBody').innerHTML;
+    ok(body.includes('医療機関コード 9999999') && body.includes('医師 架空 一郎') && !body.includes('医療機関名不明'),
+       'S6-2. 名称が無い医療機関はコードと処方医名で表示');
+    ok((await api6.search('9999999')).length===2 && (await api6.search('架空')).length===2, 'S6-3. 医療機関コード・処方医名で探せる');
+
+    h=await api6.search('10/9');
+    await api6.reviewRecord(h[0].rec, null, true);
+    let m=api6.getMeta(), res=api6.doc.getElementById('result').innerHTML;
+    ok(m.mode==='first' && m.review.timeline.length===2 && m.review.pos===0, 'S6-4. 最初の処方は比較対象なし・この患者の記録2件を把握');
+    ok(res.includes('この患者の記録（2件）') && res.includes('data-tl-idx="1"') && !res.includes('data-tl-idx="0"'),
+       'S6-5. 記録の日付を並べ、表示中以外をタップできる');
+    ok(!m.review.timeline.some(r=>res.includes(r.id)), 'S6-6. 記録のidを画面のHTMLに埋め込まない');
+    await api6.reviewRecord(m.review.timeline[1], null, true);
+    m=api6.getMeta();
+    ok(m.mode==='compare' && m.history.length===1 && m.review.pos===1 && api6.getLast().counts.del===1,
+       'S6-7. 日付をたどって次の処方の監査結果（10/9との比較）へ移れる');
+
+    // 記録が1件だけの患者
+    await api6.processScanned(api6.parseJahis([...HEAD_N.slice(0,3),'11,,別人 三郎,ﾍﾞﾂｼﾞﾝ ｻﾌﾞﾛｳ','12,1','13,19400101',
+      '51,20261009','101,1,1,,14','111,1,1,,（分１，朝食後服用）,','201,1,1,,7,2139005F3ZZZ,【般】フロセミド錠　　１０ｍｇ,1,1,錠'].join('\r\n')));
+    h=await api6.search('別人');
+    await api6.reviewRecord(h[0].rec, null, true);
+    res=api6.doc.getElementById('result').innerHTML;
+    ok(res.includes('保存記録はこの1件だけです') && !res.includes('data-tl-idx'), 'S6-8. 記録が1件だけの患者はその旨を表示');
+  }
+
   process.exit(fail?1:0);
 })().catch(e=>{ console.error('EXEC ERROR', e); process.exit(1); });
